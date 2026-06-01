@@ -1,6 +1,6 @@
 # TeamPulse 项目开发路线
 
-更新日期：2026-05-31
+更新日期：2026-06-01
 当前仓库名：`redis-demo`
 产品方向：公司内部团队协作与任务流转后端
 
@@ -67,7 +67,7 @@ Redis 在本项目中的角色不是主数据库，而是支撑公司系统中�
 | 第五阶段 | 团队动态流 | 基础功能已完成，正在完成权限验收 |
 | 第六阶段 | 热门任务排行 | 基础功能已完成，控制台页面已与任务工作台联动 |
 | 第七阶段 | 接口限流 | 创建任务限流与登录限流均已接入并完成 HTTP 联调 |
-| 增强阶段 | 高级缓存、分布式锁、评论通知、延迟任务 | 任务详情缓存与通用锁已完成，工单评论已启动 |
+| 增强阶段 | 高级缓存、分布式锁、评论通知、延迟任务 | 任务详情缓存、通用锁、工单评论与提及通知均已完成后端验收 |
 
 ## 4. Redis Key 总设计
 
@@ -86,7 +86,7 @@ Redis 在本项目中的角色不是主数据库，而是支撑公司系统中�
 | 任务详情互斥锁 | `lock:task:detail:{taskId}` | String NX | 10 秒 | 已迁移到通用锁工具 |
 | 创建任务限流 | `rate:task:create:{userId}:{minute}` | String Counter | 1 分钟 | 已实现并验收 |
 | 登录限流 | `rate:login:{ip}:{minute}` | String Counter | 1 分钟 | 已实现并验收 |
-| 延迟提醒 | 待定 | Sorted Set / Stream | 增强阶段 | 待开发 |
+| 延迟提醒 | `task:reminder` | Sorted Set | score 为提醒时间戳，member 为 taskId | 已完成设置提醒写入，待扫描到期提醒 |
 | 分布式锁 | `lock:{business}:{id}` | String NX | 短 TTL，Lua 原子释放 | 已实现通用工具 |
 
 说明：团队动态流在当前代码中使用的是 `team:activities:{teamId}`，后续延续这个已实现命名。
@@ -347,12 +347,14 @@ CREATE TABLE `notification` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户通知';
 ```
 
-第一期通知类型：
+已实现通知类型：
 
 | Type | 触发场景 | 接收人 |
 | --- | --- | --- |
 | `task_assigned` | 任务负责人变更为某成员 | 新负责人 |
 | `task_status_updated` | 任务状态发生变化 | 当前负责人 |
+| `task_commented` | 任务被评论 | 当前负责人 |
+| `task_mentioned` | 评论中提及成员 | 被提及成员 |
 
 Redis 使用 Set 加速未读数量。Set 成员为 `notificationId`，可由 MySQL 中 `is_read = 0` 的数据重建：
 
@@ -432,7 +434,7 @@ UpdateStatus 中 status 实际发生变化
 | `UpdateTask` | `task_assigned` | 已接入并验收：负责人发生变化且新负责人不是操作者本人 |
 | `UpdateStatus` | `task_status_updated` | 已接入：状态发生变化、负责人非零且负责人不是操作者本人 |
 
-后续增加评论或提及时，再扩展新的通知类型。
+评论通知与提及通知已在工单评论阶段接入。
 
 ### 联调验收记录（2026-05-27）
 
@@ -754,39 +756,73 @@ go test ./... -count=1
 
 测试结果：全部通过。
 
-### 当前下一步：工单评论与提及通知
+### 已完成：工单评论与提及通知
 
-下一步先补任务评论能力，再复用团队动态流和通知中心：评论写入 MySQL，评论成功后写入 `team:activities:{teamId}`；如果评论提醒负责人或提及成员，则创建通知。
+已完成任务评论能力，并复用团队动态流和通知中心形成闭环：评论写入 MySQL，评论成功后写入 `team:activities:{teamId}`；评论负责人或提及成员时创建通知，并写入接收人的 Redis 未读集合。
 
 ### 工单评论与提及通知
 
 目标：让任务具备真实协作讨论能力。
 
-计划数据：
+已实现数据：
 
 ```text
 task_comment
 - id
 - task_id
+- team_id
 - user_id
 - content
 - created_at
 ```
 
-评论成功后：
+已实现流程：
 
 ```text
--> 写 MySQL task_comment
--> 写 Redis 团队动态 team:activities:{teamId}
--> 如果评论提醒负责人或提及成员，创建 notification
+POST /tasks/{taskId}/comments
+-> 校验评论内容非空
+-> 校验任务存在
+-> 校验当前用户属于任务团队
+-> 校验被提及用户属于同一团队
+-> 写入 MySQL task_comment
+-> 写入 Redis 团队动态 team:activities:{teamId}
+-> 创建 task_mentioned / task_commented 通知
+-> 通知 ID 写入 notification:unread:{receiverId}
 ```
 
-计划通知类型：
+已实现通知类型：
 
 | Type | 场景 | 接收人 |
 | --- | --- | --- |
 | `task_commented` | 任务被评论 | 当前负责人 |
 | `task_mentioned` | 评论中提及成员 | 被提及成员 |
+
+已实现接口：
+
+| Method | Path | 用途 | 状态 |
+| --- | --- | --- | --- |
+| `POST` | `/tasks/{taskId}/comments` | 创建任务评论 | 已完成并验收 |
+| `GET` | `/tasks/{taskId}/comments` | 查询任务评论列表 | 已完成并验收 |
+
+已完成验收：
+
+- 成员可以创建评论，MySQL `task_comment` 正确写入。
+- 成员可以查询任务评论列表，按评论创建顺序返回。
+- 空白评论会被拒绝，返回“请输入评论内容”。
+- 非团队成员不能创建或查看目标任务评论。
+- 任务不存在时返回“任务不存在”。
+- 评论成功后写入 `team:activities:{teamId}` 动态流。
+- 提及成员时创建 `task_mentioned` 通知，并写入 `notification:unread:{receiverId}`。
+- 评论任务负责人时创建 `task_commented` 通知。
+- 同一条评论里如果负责人已经通过提及收到通知，不再重复创建 `task_commented`。
+- 评论者本人不会收到自己触发的评论或提及通知。
+
+已补充自动测试并通过：
+
+```bash
+go test ./internal/logic/task -count=1
+go test ./... -count=1
+```
 
 ### 延迟任务：任务提醒
 
@@ -810,6 +846,39 @@ ZADD task:reminder remindAt taskId
 ZRANGEBYSCORE task:reminder -inf now
 -> 对到期 taskId 创建提醒通知
 -> 处理成功后 ZREM task:reminder taskId
+```
+
+当前已完成第一小步：设置任务提醒。
+
+已实现接口：
+
+| Method | Path | 用途 | 状态 |
+| --- | --- | --- | --- |
+| `POST` | `/tasks/{taskId}/reminder` | 设置任务提醒时间 | 已完成并验收 |
+
+已实现规则：
+
+- 任务必须存在。
+- 已完成任务 `done` 不允许设置提醒。
+- 当前用户必须属于任务所在团队。
+- `remindAt` 必须晚于当前时间。
+- 写入 Redis ZSet：`ZADD task:reminder remindAt taskId`。
+
+已完成验收：
+
+- 成员给未完成任务设置未来提醒成功。
+- Redis `ZSCORE task:reminder {taskId}` 能查到对应 `remindAt`。
+- 过去时间被拒绝，返回“提醒时间必须晚于当前时间”。
+- 不存在任务被拒绝，返回“任务不存在”。
+- 非团队成员被拒绝，返回“你没有权限设置该任务提醒”。
+- 已完成任务被拒绝，返回“已完成任务不允许设置提醒”。
+- 联调产生的临时任务、动态、热度和 Redis reminder 已清理。
+
+已验证：
+
+```bash
+go test ./api/task/v1 ./internal/controller/task ./internal/logic/task -count=1
+go test ./... -count=1
 ```
 
 ### 点赞
@@ -882,21 +951,22 @@ task:likes:{taskId}
 
 ### M3：通知与工作台
 
-状态：开发中，指派通知、已读与未读数链路已验收，状态通知后端接入已完成
+状态：后端主链路已完成，前端评论入口待后续收尾
 
 - 任务事件产生通知。
 - 用户可查看通知并标记已读。
 - Redis 快速返回未读消息数。
 - 动态流展示关键协作动作。
+- 评论、提及、负责人评论通知均已完成后端验收。
 
 ### M4：稳定性与工程化
 
-状态：未开始
+状态：进行中
 
-- 关键接口具有限流。
-- 主要业务场景有测试或可重复的验证脚本。
+- 创建任务与登录接口已具有限流。
+- 任务、通知、限流、缓存、分布式锁和评论通知已有测试或可重复联调记录。
 - 明确 MySQL 与 Redis 双写失败时的处理策略。
-- 可继续加入锁与延迟提醒。
+- 分布式锁已完成，下一步继续加入延迟提醒。
 
 ## 16. 每个功能的学习与开发流程
 
@@ -936,24 +1006,24 @@ task:likes:{taskId}
 | 限流 | 创建任务限流、登录限流已完成 | `go test ./internal/logic/ratelimit -count=1` |
 | 高级缓存 | 任务详情空值缓存、缓存失效、TTL 抖动、互斥重建已完成 | `go test ./internal/logic/task -count=1` |
 | 分布式锁 | 通用 `internal/logic/lock`、Lua 原子释放已完成 | `go test ./internal/logic/lock -count=1` |
-| 工单评论 | 表结构与 API 结构已启动，尚未完成联调验收 | 待补 Logic / Controller / 测试 |
+| 工单评论 | 创建评论、评论列表、团队动态、评论通知、提及通知均已完成后端验收 | `go test ./internal/logic/task -count=1` 与 HTTP 联调 |
+| 延迟提醒 | 设置提醒接口已完成，能写入 `task:reminder` ZSet | `go test ./... -count=1` 与 HTTP/Redis 联调 |
 
-### 当前第一步：工单评论与提及通知
+### 当前第一步：扫描到期提醒
 
-目标：给任务增加评论能力。评论成功后写 MySQL 评论表、写团队动态流；如果评论中提醒负责人或提及成员，则复用通知中心创建 `task_commented` 或 `task_mentioned` 通知。
+目标：在设置提醒已经能写入 ZSet 的基础上，实现“到时间后创建通知”的最小闭环。
 
 当前拆分：
 
-1. `task_comment` 表结构与模型生成。
-2. `api/task/v1/comment.go` 定义创建评论与评论列表请求响应。
-3. `internal/logic/task` 实现创建评论：校验任务存在、校验团队成员权限、写入评论。
-4. 评论成功后写入 `team:activities:{teamId}`。
-5. 接入通知：评论负责人生成 `task_commented`，提及成员生成 `task_mentioned`。
-6. 补充成功路径、任务不存在、非团队成员拒绝、通知与 Redis 未读集合测试。
+1. 使用 `ZRANGEBYSCORE task:reminder -inf now` 读取到期任务 ID。
+2. 根据 taskId 查询 MySQL 任务，任务不存在、已完成或无负责人时跳过并清理 ZSet。
+3. 对负责人创建任务提醒通知，写入 MySQL notification 与 Redis 未读集合。
+4. 处理成功后 `ZREM task:reminder taskId`，避免重复提醒。
+5. 补充到期扫描、未到期不触发、重复扫描不重复通知的测试。
 
 ### 明日优先级
 
-优先完成评论创建 Logic，再接 Controller 和 HTTP 联调；评论列表与提及通知可以在评论创建主链路稳定后继续补。
+优先完成“扫描到期提醒”这一小步。明天先写 Logic 方法，不急着接后台 goroutine，也不先做取消提醒或前端入口。
 
 ## 18. 每日进展记录
 
@@ -1007,12 +1077,28 @@ task:likes:{taskId}
 - 启动工单评论阶段：明确 `task_comment` 表结构、评论 API 设计与后续评论通知流程；当前已有评论相关草稿文件，尚未完成 Logic / Controller / 联调验收。
 - 整理路线图结构：压缩重复的“当前下一步”和历史完成项，新增“当前工作面板”，让后续开发只看当前状态、当前第一步和明日优先级。
 
-### 2026-06-01：下一步任务规划
+### 2026-06-01：今天完成了什么
 
-目标：开始工单评论与提及通知阶段，让任务协作从“状态流转”扩展到“讨论协作”。
+- 完成工单评论 API 与 Controller：`POST /tasks/{taskId}/comments` 创建评论，`GET /tasks/{taskId}/comments` 查询评论列表。
+- 完成评论 Logic：校验任务存在、评论内容非空、当前用户属于任务团队、被提及用户属于同一团队。
+- 评论成功后写入 MySQL `task_comment`，并写入 Redis 团队动态流 `team:activities:{teamId}`。
+- 接入评论通知：提及成员创建 `task_mentioned`，评论负责人创建 `task_commented`，通知进入 `notification:unread:{receiverId}` 未读集合。
+- 补齐通知去重规则：同一条评论中负责人已被提及时，不再重复创建负责人评论通知；评论者本人不接收自己触发的通知。
+- 完成自动测试，覆盖创建评论、查询评论、非法输入、非团队成员拒绝、提及通知、负责人评论通知、重复通知抑制和自己不通知自己。
+- 完成 HTTP 联调，验证评论创建、评论列表、空白内容拒绝、非成员拒绝、任务不存在、MySQL 写入、Redis 动态流和 Redis 未读通知集合。
+- 验证通过：`go test ./internal/logic/task -count=1` 与 `go test ./... -count=1`。
+- 完成延迟提醒第一小步：新增 `POST /tasks/{taskId}/reminder`，将未来提醒时间写入 Redis ZSet `task:reminder`。
+- 设置提醒已校验任务存在、任务状态不能为 `done`、当前用户必须属于任务团队、`remindAt` 必须晚于当前时间。
+- 完成设置提醒 HTTP/Redis 联调，验证成功写入 ZSet、过去时间拒绝、任务不存在拒绝、非团队成员拒绝、已完成任务拒绝；联调临时数据已清理。
+- 验证通过：`go test ./api/task/v1 ./internal/controller/task ./internal/logic/task -count=1` 与 `go test ./... -count=1`。
 
-1. 检查 `task_comment` 表与 `dao/do/entity` 模型是否完整生成，确认字段与路线图一致。
-2. 完成评论创建 Logic：校验任务存在、当前用户属于任务团队、评论内容非空、写入评论记录。
-3. 评论成功后写入团队动态流 `team:activities:{teamId}`。
-4. 接入创建评论 Controller，并用 HTTP 验证成功路径、任务不存在和非团队成员拒绝。
-5. 再进入通知增强：评论任务负责人时创建 `task_commented`；评论中提及成员时创建 `task_mentioned`。
+### 2026-06-02：下一步任务规划
+
+目标：完成延迟提醒第二小步：扫描到期提醒，把 ZSet 中到期的 taskId 转成真实通知。
+
+1. 先只设计一个 Logic 方法，例如 `ScanDueReminders(ctx, now)`，不急着启动后台 goroutine。
+2. 用 `ZRANGEBYSCORE task:reminder -inf now` 读取到期 taskId。
+3. 查询任务并校验：任务不存在、已完成、无负责人时清理 ZSet 并跳过。
+4. 对负责人创建提醒通知，写入 notification 表和 `notification:unread:{receiverId}`。
+5. 成功后 `ZREM task:reminder taskId`，保证重复扫描不会重复通知。
+6. 验收重点：未到期不触发、到期触发一次、重复扫描不重复通知、无效任务会被清理。

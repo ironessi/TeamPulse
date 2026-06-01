@@ -1,3 +1,7 @@
+package v1
+
+import "github.com/gogf/gf/v2/frame/g"
+
 // CreateCommentReq 创建任务评论请求。
 type CreateCommentReq struct {
 	// 1. 路由方法和路径

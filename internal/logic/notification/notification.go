@@ -17,6 +17,8 @@ const (
 	notificationListLimit = 20
 	TypeTaskStatusUpdated = "task_status_updated"
 	TypeTaskAssigned      = "task_assigned"
+	TypeTaskCommented     = "task_commented"
+	TypeTaskMentioned     = "task_mentioned"
 )
 
 // notificationUnreadKey 生成当前用户的未读通知集合 key。

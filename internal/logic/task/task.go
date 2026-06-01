@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	TaskStatusTodo = "todo"
-
+	TaskStatusTodo           = "todo"
+	TaskStatusDoing          = "doing"
+	TaskStatusDone           = "done"
 	taskDetailCacheNullValue = "__NULL__"
 	taskDetailCacheExpire    = 5 * time.Minute
 	taskDetailCacheJitterMax = 60 * time.Second

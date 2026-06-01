@@ -265,6 +265,384 @@ func TestGetTaskReleasesDetailLockAfterCacheRebuild(t *testing.T) {
 	}
 }
 
+func TestCreateCommentCreatesRecordActivityAndListItem(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, _ := updateTaskTestFixture(t)
+	activityKey := fmt.Sprintf("team:activities:%d", task.TeamId)
+	content := fmt.Sprintf("  comment-test-%d  ", time.Now().UnixNano())
+
+	commentId, err := CreateComment(ctx, memberId, task.Id, content, []uint64{memberId})
+	if err != nil {
+		t.Fatalf("CreateComment failed: %v", err)
+	}
+	if commentId == 0 {
+		t.Fatal("comment id should not be zero")
+	}
+
+	t.Cleanup(func() {
+		if _, err := dao.TaskComment.Ctx(ctx).Where("id", commentId).Delete(); err != nil {
+			t.Errorf("delete test comment failed: %v", err)
+		}
+		if _, err := g.Redis().LPop(ctx, activityKey); err != nil {
+			t.Errorf("remove test comment activity failed: %v", err)
+		}
+	})
+
+	var created entity.TaskComment
+	if err := dao.TaskComment.Ctx(ctx).Where("id", commentId).Scan(&created); err != nil {
+		t.Fatalf("query created comment failed: %v", err)
+	}
+	if created.Id != commentId ||
+		created.TaskId != task.Id ||
+		created.TeamId != task.TeamId ||
+		created.UserId != memberId ||
+		created.Content != strings.TrimSpace(content) {
+		t.Fatalf("unexpected created comment: %+v", created)
+	}
+
+	activityValue, err := g.Redis().LIndex(ctx, activityKey, 0)
+	if err != nil {
+		t.Fatalf("read comment activity failed: %v", err)
+	}
+	if !strings.Contains(activityValue.String(), "task_commented") {
+		t.Fatalf("comment activity should contain task_commented, got %q", activityValue.String())
+	}
+
+	items, err := ListComments(ctx, memberId, task.Id)
+	if err != nil {
+		t.Fatalf("ListComments failed: %v", err)
+	}
+	found := false
+	for _, item := range items {
+		if item.CommentId == commentId {
+			found = true
+			if item.Content != strings.TrimSpace(content) ||
+				item.TaskId != task.Id ||
+				item.TeamId != task.TeamId ||
+				item.UserId != memberId {
+				t.Fatalf("unexpected comment item: %+v", item)
+			}
+			if item.CreatedAt == 0 {
+				t.Fatalf("comment item should include createdAt: %+v", item)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("created comment %d not found in list: %+v", commentId, items)
+	}
+}
+
+func TestCreateCommentRejectsInvalidInputs(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, outsiderId := updateTaskTestFixture(t)
+
+	tests := []struct {
+		name           string
+		userId         uint64
+		taskId         uint64
+		content        string
+		mentionUserIds []uint64
+		wantErr        string
+	}{
+		{
+			name:    "empty content",
+			userId:  memberId,
+			taskId:  task.Id,
+			content: "   ",
+			wantErr: "请输入评论内容",
+		},
+		{
+			name:    "missing task",
+			userId:  memberId,
+			taskId:  uint64(time.Now().UnixNano()),
+			content: "missing task comment",
+			wantErr: "任务不存在",
+		},
+		{
+			name:    "non member",
+			userId:  outsiderId,
+			taskId:  task.Id,
+			content: "outsider comment",
+			wantErr: "你没有权限评论该任务",
+		},
+		{
+			name:           "empty mention user",
+			userId:         memberId,
+			taskId:         task.Id,
+			content:        "empty mention",
+			mentionUserIds: []uint64{0},
+			wantErr:        "提及用户不能为空",
+		},
+		{
+			name:           "mention outside team",
+			userId:         memberId,
+			taskId:         task.Id,
+			content:        "outside mention",
+			mentionUserIds: []uint64{outsiderId},
+			wantErr:        "提及用户不是该团队成员",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			commentId, err := CreateComment(ctx, tt.userId, tt.taskId, tt.content, tt.mentionUserIds)
+			if err == nil {
+				t.Fatalf("CreateComment should fail, commentId=%d", commentId)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("unexpected error: got=%v want contains=%q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestListCommentsRejectsNonMemberAndMissingTask(t *testing.T) {
+	ctx := gctx.New()
+	task, _, outsiderId := updateTaskTestFixture(t)
+
+	_, err := ListComments(ctx, outsiderId, task.Id)
+	if err == nil {
+		t.Fatal("ListComments should reject non-member")
+	}
+	if !strings.Contains(err.Error(), "你没有权限查看该任务评论") {
+		t.Fatalf("unexpected non-member error: %v", err)
+	}
+
+	_, err = ListComments(ctx, outsiderId, uint64(time.Now().UnixNano()))
+	if err == nil {
+		t.Fatal("ListComments should reject missing task")
+	}
+	if !strings.Contains(err.Error(), "任务不存在") {
+		t.Fatalf("unexpected missing task error: %v", err)
+	}
+}
+
+func TestCreateCommentCreatesMentionNotification(t *testing.T) {
+	ctx := gctx.New()
+	task, commenterId, mentionUserId := commentNotificationTestFixture(t)
+	activityKey := fmt.Sprintf("team:activities:%d", task.TeamId)
+
+	_, err := dao.Task.Ctx(ctx).Where("id", task.Id).Data(g.Map{
+		"assignee_id": nil,
+	}).Update()
+	if err != nil {
+		t.Fatalf("prepare task assignee failed: %v", err)
+	}
+
+	commentId, err := CreateComment(
+		ctx,
+		commenterId,
+		task.Id,
+		fmt.Sprintf("mention notification test %d", time.Now().UnixNano()),
+		[]uint64{mentionUserId},
+	)
+	if err != nil {
+		t.Fatalf("CreateComment failed: %v", err)
+	}
+
+	var created entity.Notification
+	err = dao.Notification.Ctx(ctx).
+		Where("receiver_id", mentionUserId).
+		Where("actor_id", commenterId).
+		Where("type", notificationLogic.TypeTaskMentioned).
+		Where("related_task_id", task.Id).
+		OrderDesc("id").
+		Limit(1).
+		Scan(&created)
+	if err != nil {
+		t.Fatalf("query mention notification failed: %v", err)
+	}
+	if created.Id == 0 {
+		t.Fatal("mention notification was not created")
+	}
+
+	inUnreadSet, err := g.Redis().SIsMember(ctx, fmt.Sprintf("notification:unread:%d", mentionUserId), created.Id)
+	if err != nil {
+		t.Fatalf("check unread set failed: %v", err)
+	}
+	if inUnreadSet != 1 {
+		t.Fatalf("notification %d was not added to unread set", created.Id)
+	}
+
+	t.Cleanup(func() {
+		restoreTaskForStatusTest(t, task)
+		cleanupCommentNotificationTest(t, commentId, created.Id, mentionUserId, activityKey)
+	})
+}
+
+func TestCreateCommentCreatesAssigneeCommentNotification(t *testing.T) {
+	ctx := gctx.New()
+	task, commenterId, assigneeId := commentNotificationTestFixture(t)
+	activityKey := fmt.Sprintf("team:activities:%d", task.TeamId)
+
+	_, err := dao.Task.Ctx(ctx).Where("id", task.Id).Data(g.Map{
+		"assignee_id": assigneeId,
+	}).Update()
+	if err != nil {
+		t.Fatalf("prepare task assignee failed: %v", err)
+	}
+
+	commentId, err := CreateComment(
+		ctx,
+		commenterId,
+		task.Id,
+		fmt.Sprintf("assignee comment notification test %d", time.Now().UnixNano()),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CreateComment failed: %v", err)
+	}
+
+	var created entity.Notification
+	err = dao.Notification.Ctx(ctx).
+		Where("receiver_id", assigneeId).
+		Where("actor_id", commenterId).
+		Where("type", notificationLogic.TypeTaskCommented).
+		Where("related_task_id", task.Id).
+		OrderDesc("id").
+		Limit(1).
+		Scan(&created)
+	if err != nil {
+		t.Fatalf("query assignee comment notification failed: %v", err)
+	}
+	if created.Id == 0 {
+		t.Fatal("assignee comment notification was not created")
+	}
+
+	inUnreadSet, err := g.Redis().SIsMember(ctx, fmt.Sprintf("notification:unread:%d", assigneeId), created.Id)
+	if err != nil {
+		t.Fatalf("check unread set failed: %v", err)
+	}
+	if inUnreadSet != 1 {
+		t.Fatalf("notification %d was not added to unread set", created.Id)
+	}
+
+	t.Cleanup(func() {
+		restoreTaskForStatusTest(t, task)
+		cleanupCommentNotificationTest(t, commentId, created.Id, assigneeId, activityKey)
+	})
+}
+
+func TestCreateCommentMentionSuppressesDuplicateAssigneeNotification(t *testing.T) {
+	ctx := gctx.New()
+	task, commenterId, assigneeId := commentNotificationTestFixture(t)
+	activityKey := fmt.Sprintf("team:activities:%d", task.TeamId)
+
+	_, err := dao.Task.Ctx(ctx).Where("id", task.Id).Data(g.Map{
+		"assignee_id": assigneeId,
+	}).Update()
+	if err != nil {
+		t.Fatalf("prepare task assignee failed: %v", err)
+	}
+
+	beforeCommentedCount, err := dao.Notification.Ctx(ctx).
+		Where("receiver_id", assigneeId).
+		Where("actor_id", commenterId).
+		Where("type", notificationLogic.TypeTaskCommented).
+		Where("related_task_id", task.Id).
+		Count()
+	if err != nil {
+		t.Fatalf("count comment notifications before test failed: %v", err)
+	}
+
+	commentId, err := CreateComment(
+		ctx,
+		commenterId,
+		task.Id,
+		fmt.Sprintf("duplicate notification test %d", time.Now().UnixNano()),
+		[]uint64{assigneeId},
+	)
+	if err != nil {
+		t.Fatalf("CreateComment failed: %v", err)
+	}
+
+	var mentioned entity.Notification
+	err = dao.Notification.Ctx(ctx).
+		Where("receiver_id", assigneeId).
+		Where("actor_id", commenterId).
+		Where("type", notificationLogic.TypeTaskMentioned).
+		Where("related_task_id", task.Id).
+		OrderDesc("id").
+		Limit(1).
+		Scan(&mentioned)
+	if err != nil {
+		t.Fatalf("query mention notification failed: %v", err)
+	}
+	if mentioned.Id == 0 {
+		t.Fatal("mention notification was not created")
+	}
+
+	afterCommentedCount, err := dao.Notification.Ctx(ctx).
+		Where("receiver_id", assigneeId).
+		Where("actor_id", commenterId).
+		Where("type", notificationLogic.TypeTaskCommented).
+		Where("related_task_id", task.Id).
+		Count()
+	if err != nil {
+		t.Fatalf("count comment notifications after test failed: %v", err)
+	}
+	if afterCommentedCount != beforeCommentedCount {
+		t.Fatalf("assignee should not receive duplicate task_commented: before=%d after=%d", beforeCommentedCount, afterCommentedCount)
+	}
+
+	t.Cleanup(func() {
+		restoreTaskForStatusTest(t, task)
+		cleanupCommentNotificationTest(t, commentId, mentioned.Id, assigneeId, activityKey)
+	})
+}
+
+func TestCreateCommentDoesNotNotifySelf(t *testing.T) {
+	ctx := gctx.New()
+	task, commenterId, _ := commentNotificationTestFixture(t)
+	activityKey := fmt.Sprintf("team:activities:%d", task.TeamId)
+
+	_, err := dao.Task.Ctx(ctx).Where("id", task.Id).Data(g.Map{
+		"assignee_id": commenterId,
+	}).Update()
+	if err != nil {
+		t.Fatalf("prepare self assignee failed: %v", err)
+	}
+
+	beforeNotifications, err := dao.Notification.Ctx(ctx).
+		Where("receiver_id", commenterId).
+		Where("actor_id", commenterId).
+		WhereIn("type", []string{notificationLogic.TypeTaskCommented, notificationLogic.TypeTaskMentioned}).
+		Where("related_task_id", task.Id).
+		Count()
+	if err != nil {
+		t.Fatalf("count self notifications before test failed: %v", err)
+	}
+
+	commentId, err := CreateComment(
+		ctx,
+		commenterId,
+		task.Id,
+		fmt.Sprintf("self notification test %d", time.Now().UnixNano()),
+		[]uint64{commenterId},
+	)
+	if err != nil {
+		t.Fatalf("CreateComment failed: %v", err)
+	}
+
+	afterNotifications, err := dao.Notification.Ctx(ctx).
+		Where("receiver_id", commenterId).
+		Where("actor_id", commenterId).
+		WhereIn("type", []string{notificationLogic.TypeTaskCommented, notificationLogic.TypeTaskMentioned}).
+		Where("related_task_id", task.Id).
+		Count()
+	if err != nil {
+		t.Fatalf("count self notifications after test failed: %v", err)
+	}
+	if afterNotifications != beforeNotifications {
+		t.Fatalf("self notification should not be created: before=%d after=%d", beforeNotifications, afterNotifications)
+	}
+
+	t.Cleanup(func() {
+		restoreTaskForStatusTest(t, task)
+		cleanupCommentNotificationTest(t, commentId, 0, 0, activityKey)
+	})
+}
+
 func TestUpdateTaskRejectsNonMember(t *testing.T) {
 	ctx := gctx.New()
 	task, _, outsiderId := updateTaskTestFixture(t)
@@ -476,6 +854,37 @@ func restoreTaskEditableFields(t *testing.T, original entity.Task) {
 	}).Update()
 	if err != nil {
 		t.Errorf("restore task editable fields failed: %v", err)
+	}
+}
+
+func commentNotificationTestFixture(t *testing.T) (entity.Task, uint64, uint64) {
+	t.Helper()
+
+	task, commenterId, receiverId := statusNotificationTestFixture(t)
+	return task, commenterId, receiverId
+}
+
+func cleanupCommentNotificationTest(t *testing.T, commentId uint64, notificationId uint64, receiverId uint64, activityKey string) {
+	t.Helper()
+	ctx := gctx.New()
+
+	if commentId > 0 {
+		if _, err := dao.TaskComment.Ctx(ctx).Where("id", commentId).Delete(); err != nil {
+			t.Errorf("delete test comment failed: %v", err)
+		}
+	}
+	if notificationId > 0 {
+		if _, err := dao.Notification.Ctx(ctx).Where("id", notificationId).Delete(); err != nil {
+			t.Errorf("delete test notification failed: %v", err)
+		}
+	}
+	if receiverId > 0 && notificationId > 0 {
+		if _, err := g.Redis().SRem(ctx, fmt.Sprintf("notification:unread:%d", receiverId), notificationId); err != nil {
+			t.Errorf("remove notification from unread set failed: %v", err)
+		}
+	}
+	if _, err := g.Redis().LPop(ctx, activityKey); err != nil {
+		t.Errorf("remove test activity failed: %v", err)
 	}
 }
 
