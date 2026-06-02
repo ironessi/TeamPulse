@@ -86,7 +86,7 @@ Redis 在本项目中的角色不是主数据库，而是支撑公司系统中�
 | 任务详情互斥锁 | `lock:task:detail:{taskId}` | String NX | 10 秒 | 已迁移到通用锁工具 |
 | 创建任务限流 | `rate:task:create:{userId}:{minute}` | String Counter | 1 分钟 | 已实现并验收 |
 | 登录限流 | `rate:login:{ip}:{minute}` | String Counter | 1 分钟 | 已实现并验收 |
-| 延迟提醒 | `task:reminder` | Sorted Set | score 为提醒时间戳，member 为 taskId | 已完成设置提醒写入，待扫描到期提醒 |
+| 延迟提醒 | `task:reminder` | Sorted Set | score 为提醒时间戳，member 为 taskId | 设置提醒、扫描到期、后台 scanner 与 scanner 分布式锁已完成 |
 | 分布式锁 | `lock:{business}:{id}` | String NX | 短 TTL，Lua 原子释放 | 已实现通用工具 |
 
 说明：团队动态流在当前代码中使用的是 `team:activities:{teamId}`，后续延续这个已实现命名。
@@ -848,7 +848,7 @@ ZRANGEBYSCORE task:reminder -inf now
 -> 处理成功后 ZREM task:reminder taskId
 ```
 
-当前已完成第一小步：设置任务提醒。
+当前已完成：设置任务提醒、扫描到期提醒、后台定时扫描。
 
 已实现接口：
 
@@ -878,6 +878,89 @@ ZRANGEBYSCORE task:reminder -inf now
 
 ```bash
 go test ./api/task/v1 ./internal/controller/task ./internal/logic/task -count=1
+go test ./... -count=1
+```
+
+已完成第二小步：扫描到期提醒。
+
+已实现流程：
+
+```text
+ScanDueReminders(ctx, now)
+-> ZRANGEBYSCORE task:reminder -inf now
+-> 解析到期 taskId
+-> 查询 MySQL 任务
+-> 任务不存在、已完成或无负责人时清理 ZSet
+-> 正常任务给负责人创建 task_reminder 通知
+-> 通知成功后 ZREM task:reminder taskId
+```
+
+已完成第三小步：后台定时扫描。
+
+```text
+服务启动
+-> StartReminderScanner(ctx)
+-> goroutine 每 5 秒触发一次
+-> 调用 ScanDueReminders(ctx, time.Now().Unix())
+-> 扫描失败只记录日志，不影响 HTTP 服务
+```
+
+已完成验收：
+
+- 未到期任务不会创建通知，仍保留在 `task:reminder`。
+- 到期任务会创建 `task_reminder` 通知，并进入 `notification:unread:{assigneeId}`。
+- 通知成功后会从 `task:reminder` 移除 taskId。
+- 重复扫描不会重复创建通知。
+- 脏 member、不存在任务、已完成任务和无负责人任务会被清理。
+- 服务启动后，后台 scanner 能自动把到期 reminder 转换成通知。
+
+已验证：
+
+```bash
+go test ./internal/logic/task -run 'TestScanDueReminders' -count=1
+go test ./internal/logic/task -count=1
+go test ./... -count=1
+```
+
+服务级联调记录：
+
+- 启动当前代码版本服务后，手动写入已到期 `task:reminder` member。
+- scanner 自动创建 MySQL `task_reminder` 通知。
+- 通知 ID 写入负责人未读集合。
+- `task:reminder` 中对应 taskId 自动移除。
+- 联调产生的通知、未读集合成员和 reminder 已清理。
+
+已完成第四小步：scanner 分布式锁。
+
+已实现流程：
+
+```text
+ticker 触发
+-> TryLock lock:task:reminder:scanner
+-> 拿不到锁：跳过本轮
+-> 拿到锁：ScanDueReminders(ctx, now)
+-> defer Unlock
+```
+
+已实现规则：
+
+- scanner 锁 key 为 `lock:task:reminder:scanner`。
+- scanner 锁 TTL 为 4 秒，扫描间隔为 5 秒。
+- 拿不到锁不是错误，说明其他实例正在扫描。
+- 拿到锁后通过 `defer` 释放，避免后续扫描逻辑增加分支时漏释放。
+
+已完成验收：
+
+- 已有 scanner 锁时，本轮扫描跳过，不创建通知，ZSet 保持不变。
+- 无 scanner 锁时，当前实例能拿锁、扫描到期提醒、创建通知、移除 ZSet。
+- 扫描结束后 scanner 锁被释放。
+- 服务级联调验证加锁后的后台 scanner 仍能自动创建通知。
+
+已验证：
+
+```bash
+go test ./internal/logic/task -run 'TestScanDueRemindersWithLock' -count=1
+go test ./internal/logic/task ./internal/logic/lock -count=1
 go test ./... -count=1
 ```
 
@@ -1007,23 +1090,21 @@ task:likes:{taskId}
 | 高级缓存 | 任务详情空值缓存、缓存失效、TTL 抖动、互斥重建已完成 | `go test ./internal/logic/task -count=1` |
 | 分布式锁 | 通用 `internal/logic/lock`、Lua 原子释放已完成 | `go test ./internal/logic/lock -count=1` |
 | 工单评论 | 创建评论、评论列表、团队动态、评论通知、提及通知均已完成后端验收 | `go test ./internal/logic/task -count=1` 与 HTTP 联调 |
-| 延迟提醒 | 设置提醒接口已完成，能写入 `task:reminder` ZSet | `go test ./... -count=1` 与 HTTP/Redis 联调 |
+| 延迟提醒 | 设置提醒、扫描到期提醒、后台 scanner、scanner 分布式锁均已完成 | `go test ./... -count=1` 与服务级联调 |
 
-### 当前第一步：扫描到期提醒
+### 当前第一步：延迟提醒体验收口
 
-目标：在设置提醒已经能写入 ZSet 的基础上，实现“到时间后创建通知”的最小闭环。
+目标：延迟提醒后端主链路已经跑通，下一步只做一个小体验收口，避免继续把功能摊大。
 
 当前拆分：
 
-1. 使用 `ZRANGEBYSCORE task:reminder -inf now` 读取到期任务 ID。
-2. 根据 taskId 查询 MySQL 任务，任务不存在、已完成或无负责人时跳过并清理 ZSet。
-3. 对负责人创建任务提醒通知，写入 MySQL notification 与 Redis 未读集合。
-4. 处理成功后 `ZREM task:reminder taskId`，避免重复提醒。
-5. 补充到期扫描、未到期不触发、重复扫描不重复通知的测试。
+1. 可选小切片一：取消提醒接口，`DELETE /tasks/{taskId}/reminder`。
+2. 可选小切片二：前端任务详情里增加设置提醒入口。
+3. 两者不要同一天并行开发，先选一个完成测试和联调。
 
 ### 明日优先级
 
-优先完成“扫描到期提醒”这一小步。明天先写 Logic 方法，不急着接后台 goroutine，也不先做取消提醒或前端入口。
+优先建议做取消提醒接口。它和已完成的设置提醒、扫描提醒形成完整管理闭环，但实现范围仍然很小。
 
 ## 18. 每日进展记录
 
@@ -1092,13 +1173,48 @@ task:likes:{taskId}
 - 完成设置提醒 HTTP/Redis 联调，验证成功写入 ZSet、过去时间拒绝、任务不存在拒绝、非团队成员拒绝、已完成任务拒绝；联调临时数据已清理。
 - 验证通过：`go test ./api/task/v1 ./internal/controller/task ./internal/logic/task -count=1` 与 `go test ./... -count=1`。
 
-### 2026-06-02：下一步任务规划
+### 2026-06-02：今天完成了什么
 
-目标：完成延迟提醒第二小步：扫描到期提醒，把 ZSet 中到期的 taskId 转成真实通知。
+- 完成 `task_reminder` 通知类型。
+- 完成 `ScanDueReminders(ctx, now)`：使用 `ZRANGEBYSCORE task:reminder -inf now` 扫描到期 taskId。
+- 扫描时以 MySQL 任务为真实数据源；任务不存在、已完成或无负责人时清理 ZSet 并跳过。
+- 正常到期任务会给负责人创建 `task_reminder` 通知，并写入 `notification:unread:{assigneeId}`。
+- 通知创建成功后再 `ZREM task:reminder taskId`，避免先删除 reminder 后通知创建失败导致提醒丢失。
+- 补充提醒扫描自动测试，覆盖未到期不触发、到期触发、重复扫描不重复、脏 member/无效任务清理。
+- 完成 `StartReminderScanner(ctx)`，服务启动后用 goroutine 和 ticker 每 5 秒扫描一次到期提醒。
+- 在 `internal/cmd/cmd.go` 接入后台 scanner。
+- 完成服务级联调：启动当前代码服务，写入到期 reminder，scanner 自动创建通知、写入未读集合并移除 ZSet member；联调数据已清理。
+- 验证通过：`go test ./internal/logic/task -count=1` 与 `go test ./... -count=1`。
 
-1. 先只设计一个 Logic 方法，例如 `ScanDueReminders(ctx, now)`，不急着启动后台 goroutine。
-2. 用 `ZRANGEBYSCORE task:reminder -inf now` 读取到期 taskId。
-3. 查询任务并校验：任务不存在、已完成、无负责人时清理 ZSet 并跳过。
-4. 对负责人创建提醒通知，写入 notification 表和 `notification:unread:{receiverId}`。
-5. 成功后 `ZREM task:reminder taskId`，保证重复扫描不会重复通知。
-6. 验收重点：未到期不触发、到期触发一次、重复扫描不重复通知、无效任务会被清理。
+### 2026-06-03：计划已完成
+
+目标：延迟提醒增强收口，优先练习“多实例防重复扫描”。
+
+1. 先给 scanner 加一把短 TTL 分布式锁：`lock:task:reminder:scanner`。
+2. `StartReminderScanner` 每轮触发时先尝试获取锁。
+3. 拿到锁才调用 `ScanDueReminders`，拿不到锁直接跳过本轮。
+4. 使用现有 `internal/logic/lock` 工具释放锁，保持 token 校验。
+5. 补充测试或最小联调，验证拿不到锁时不会扫描，拿到锁时正常处理。
+6. 这一阶段不做取消提醒、不做前端，保持小切片。
+
+### 2026-06-03：今天完成了什么
+
+- 给延迟提醒后台 scanner 接入分布式锁 `lock:task:reminder:scanner`。
+- 每轮 ticker 触发时先尝试获取锁，拿不到锁直接跳过本轮，避免多实例重复扫描同一批 reminder。
+- 拿到锁后调用 `ScanDueReminders(ctx, now)`，扫描结束通过 `defer Unlock` 释放锁。
+- 补充 `scanDueRemindersWithLock`，让 scanner 加锁扫描逻辑可单独测试。
+- 补充自动测试，覆盖已有锁时跳过扫描、无锁时扫描并释放锁。
+- 完成服务级联调：写入到期 reminder 后，scanner 自动拿锁、创建 `task_reminder` 通知、写入未读集合、移除 ZSet member，并最终释放锁。
+- 联调产生的通知、未读集合成员、scanner 锁和 reminder 已清理。
+- 验证通过：`go test ./internal/logic/task -run 'TestScanDueRemindersWithLock' -count=1`、`go test ./internal/logic/task ./internal/logic/lock -count=1` 与 `go test ./... -count=1`。
+
+### 2026-06-04：下一步任务规划
+
+目标：延迟提醒体验收口，优先补取消提醒接口。
+
+1. 先设计 `DELETE /tasks/{taskId}/reminder`。
+2. Logic 校验任务存在、当前用户属于任务所在团队。
+3. 已完成任务或不存在 reminder 时保持幂等，直接返回成功或明确错误策略。
+4. 执行 `ZREM task:reminder taskId` 取消待提醒任务。
+5. 补充测试：成员取消成功、非成员拒绝、任务不存在拒绝、重复取消幂等。
+6. 这一阶段暂不做前端，等接口稳定后再接页面入口。

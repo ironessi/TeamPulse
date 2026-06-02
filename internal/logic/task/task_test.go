@@ -1066,6 +1066,246 @@ func TestUpdateStatusDoesNotNotifySelf(t *testing.T) {
 	})
 }
 
+func TestScanDueRemindersSkipsFutureReminder(t *testing.T) {
+	ctx := gctx.New()
+	task, _, assigneeId := statusNotificationTestFixture(t)
+	now := time.Now().Unix()
+	member := fmt.Sprintf("%d", task.Id)
+
+	prepareTaskReminderFixture(t, task, assigneeId)
+	if _, err := g.Redis().Do(ctx, "ZADD", taskReminderKey, now+3600, member); err != nil {
+		t.Fatalf("prepare future reminder failed: %v", err)
+	}
+
+	beforeNotifications := countReminderNotifications(t, task.Id, assigneeId)
+
+	if err := ScanDueReminders(ctx, now); err != nil {
+		t.Fatalf("scan due reminders failed: %v", err)
+	}
+
+	afterNotifications := countReminderNotifications(t, task.Id, assigneeId)
+	if afterNotifications != beforeNotifications {
+		t.Fatalf("future reminder should not create notification: before=%d after=%d", beforeNotifications, afterNotifications)
+	}
+	if !reminderMemberExists(t, member) {
+		t.Fatal("future reminder should remain in task:reminder")
+	}
+
+	t.Cleanup(func() {
+		restoreTaskForStatusTest(t, task)
+		removeTaskReminderMemberForTest(t, member)
+	})
+}
+
+func TestScanDueRemindersCreatesNotificationAndRemovesReminder(t *testing.T) {
+	ctx := gctx.New()
+	task, _, assigneeId := statusNotificationTestFixture(t)
+	now := time.Now().Unix()
+	member := fmt.Sprintf("%d", task.Id)
+
+	prepareTaskReminderFixture(t, task, assigneeId)
+	if _, err := g.Redis().Do(ctx, "ZADD", taskReminderKey, now-1, member); err != nil {
+		t.Fatalf("prepare due reminder failed: %v", err)
+	}
+
+	beforeNotifications := countReminderNotifications(t, task.Id, assigneeId)
+
+	if err := ScanDueReminders(ctx, now); err != nil {
+		t.Fatalf("scan due reminders failed: %v", err)
+	}
+
+	afterNotifications := countReminderNotifications(t, task.Id, assigneeId)
+	if afterNotifications != beforeNotifications+1 {
+		t.Fatalf("due reminder should create one notification: before=%d after=%d", beforeNotifications, afterNotifications)
+	}
+	if reminderMemberExists(t, member) {
+		t.Fatal("due reminder should be removed after notification is created")
+	}
+
+	created := latestReminderNotification(t, task.Id, assigneeId)
+	if created.Id == 0 {
+		t.Fatal("created reminder notification not found")
+	}
+	if created.ActorId != 0 {
+		t.Fatalf("system reminder actor should be 0, got %d", created.ActorId)
+	}
+	inUnreadSet, err := g.Redis().SIsMember(ctx, fmt.Sprintf("notification:unread:%d", assigneeId), created.Id)
+	if err != nil {
+		t.Fatalf("check unread set failed: %v", err)
+	}
+	if inUnreadSet != 1 {
+		t.Fatalf("notification %d was not added to unread set", created.Id)
+	}
+
+	if err := ScanDueReminders(ctx, now); err != nil {
+		t.Fatalf("repeat scan due reminders failed: %v", err)
+	}
+	repeatedNotifications := countReminderNotifications(t, task.Id, assigneeId)
+	if repeatedNotifications != afterNotifications {
+		t.Fatalf("repeat scan should not create duplicate notification: before=%d after=%d", afterNotifications, repeatedNotifications)
+	}
+
+	t.Cleanup(func() {
+		restoreTaskForStatusTest(t, task)
+		deleteReminderNotification(t, created.Id, assigneeId)
+		removeTaskReminderMemberForTest(t, member)
+	})
+}
+
+func TestScanDueRemindersCleansInvalidReminderMembers(t *testing.T) {
+	ctx := gctx.New()
+	task, _, assigneeId := statusNotificationTestFixture(t)
+	now := time.Now().Unix()
+	missingMember := fmt.Sprintf("%d", uint64(time.Now().UnixNano()))
+	dirtyMember := "not-a-task-id"
+	doneMember := fmt.Sprintf("%d", task.Id)
+
+	prepareTaskReminderFixture(t, task, assigneeId)
+	if _, err := dao.Task.Ctx(ctx).Where("id", task.Id).Data(g.Map{
+		"status": TaskStatusDone,
+	}).Update(); err != nil {
+		t.Fatalf("prepare done task failed: %v", err)
+	}
+
+	for _, member := range []string{missingMember, dirtyMember, doneMember} {
+		if _, err := g.Redis().Do(ctx, "ZADD", taskReminderKey, now-1, member); err != nil {
+			t.Fatalf("prepare invalid reminder member %s failed: %v", member, err)
+		}
+	}
+
+	if err := ScanDueReminders(ctx, now); err != nil {
+		t.Fatalf("scan due reminders failed: %v", err)
+	}
+
+	for _, member := range []string{missingMember, dirtyMember, doneMember} {
+		if reminderMemberExists(t, member) {
+			t.Fatalf("invalid reminder member %s should be cleaned", member)
+		}
+	}
+
+	t.Cleanup(func() {
+		restoreTaskForStatusTest(t, task)
+		for _, member := range []string{missingMember, dirtyMember, doneMember} {
+			removeTaskReminderMemberForTest(t, member)
+		}
+	})
+}
+
+func TestScanDueRemindersCleansTaskWithoutAssignee(t *testing.T) {
+	ctx := gctx.New()
+	task, _, _ := statusNotificationTestFixture(t)
+	now := time.Now().Unix()
+	member := fmt.Sprintf("%d", task.Id)
+
+	if _, err := dao.Task.Ctx(ctx).Where("id", task.Id).Data(g.Map{
+		"status":      TaskStatusDoing,
+		"assignee_id": nil,
+	}).Update(); err != nil {
+		t.Fatalf("prepare unassigned task failed: %v", err)
+	}
+	if _, err := g.Redis().Do(ctx, "ZADD", taskReminderKey, now-1, member); err != nil {
+		t.Fatalf("prepare unassigned reminder failed: %v", err)
+	}
+
+	if err := ScanDueReminders(ctx, now); err != nil {
+		t.Fatalf("scan due reminders failed: %v", err)
+	}
+
+	if reminderMemberExists(t, member) {
+		t.Fatal("unassigned task reminder should be cleaned")
+	}
+
+	t.Cleanup(func() {
+		restoreTaskForStatusTest(t, task)
+		removeTaskReminderMemberForTest(t, member)
+	})
+}
+
+func TestScanDueRemindersWithLockSkipsWhenLockHeld(t *testing.T) {
+	ctx := gctx.New()
+	task, _, assigneeId := statusNotificationTestFixture(t)
+	now := time.Now().Unix()
+	member := fmt.Sprintf("%d", task.Id)
+
+	prepareTaskReminderFixture(t, task, assigneeId)
+	if _, err := g.Redis().Do(ctx, "SET", taskReminderScannerLockKey, "held-by-other-instance", "EX", 10); err != nil {
+		t.Fatalf("prepare scanner lock failed: %v", err)
+	}
+	if _, err := g.Redis().Do(ctx, "ZADD", taskReminderKey, now-1, member); err != nil {
+		t.Fatalf("prepare due reminder failed: %v", err)
+	}
+
+	beforeNotifications := countReminderNotifications(t, task.Id, assigneeId)
+
+	if err := scanDueRemindersWithLock(ctx, now); err != nil {
+		t.Fatalf("scan due reminders with held lock failed: %v", err)
+	}
+
+	afterNotifications := countReminderNotifications(t, task.Id, assigneeId)
+	if afterNotifications != beforeNotifications {
+		t.Fatalf("held scanner lock should skip scanning: before=%d after=%d", beforeNotifications, afterNotifications)
+	}
+	if !reminderMemberExists(t, member) {
+		t.Fatal("held scanner lock should leave reminder member untouched")
+	}
+
+	t.Cleanup(func() {
+		restoreTaskForStatusTest(t, task)
+		removeTaskReminderMemberForTest(t, member)
+		if _, err := g.Redis().Del(ctx, taskReminderScannerLockKey); err != nil {
+			t.Errorf("clean scanner lock failed: %v", err)
+		}
+	})
+}
+
+func TestScanDueRemindersWithLockScansAndReleasesLock(t *testing.T) {
+	ctx := gctx.New()
+	task, _, assigneeId := statusNotificationTestFixture(t)
+	now := time.Now().Unix()
+	member := fmt.Sprintf("%d", task.Id)
+
+	prepareTaskReminderFixture(t, task, assigneeId)
+	if _, err := g.Redis().Del(ctx, taskReminderScannerLockKey); err != nil {
+		t.Fatalf("clean scanner lock before test failed: %v", err)
+	}
+	if _, err := g.Redis().Do(ctx, "ZADD", taskReminderKey, now-1, member); err != nil {
+		t.Fatalf("prepare due reminder failed: %v", err)
+	}
+
+	beforeNotifications := countReminderNotifications(t, task.Id, assigneeId)
+
+	if err := scanDueRemindersWithLock(ctx, now); err != nil {
+		t.Fatalf("scan due reminders with lock failed: %v", err)
+	}
+
+	afterNotifications := countReminderNotifications(t, task.Id, assigneeId)
+	if afterNotifications != beforeNotifications+1 {
+		t.Fatalf("scanner lock holder should create one notification: before=%d after=%d", beforeNotifications, afterNotifications)
+	}
+	if reminderMemberExists(t, member) {
+		t.Fatal("scanner lock holder should remove processed reminder")
+	}
+
+	lockValue, err := g.Redis().Get(ctx, taskReminderScannerLockKey)
+	if err != nil {
+		t.Fatalf("read scanner lock after scan failed: %v", err)
+	}
+	if !lockValue.IsNil() {
+		t.Fatalf("scanner lock should be released, got %q", lockValue.String())
+	}
+
+	created := latestReminderNotification(t, task.Id, assigneeId)
+
+	t.Cleanup(func() {
+		restoreTaskForStatusTest(t, task)
+		deleteReminderNotification(t, created.Id, assigneeId)
+		removeTaskReminderMemberForTest(t, member)
+		if _, err := g.Redis().Del(ctx, taskReminderScannerLockKey); err != nil {
+			t.Errorf("clean scanner lock failed: %v", err)
+		}
+	})
+}
+
 func statusNotificationTestFixture(t *testing.T) (entity.Task, uint64, uint64) {
 	t.Helper()
 	ctx := gctx.New()
@@ -1112,4 +1352,85 @@ func nextStatus(status string) string {
 		return "done"
 	}
 	return "doing"
+}
+
+func prepareTaskReminderFixture(t *testing.T, task entity.Task, assigneeId uint64) {
+	t.Helper()
+	ctx := gctx.New()
+
+	_, err := dao.Task.Ctx(ctx).Where("id", task.Id).Data(g.Map{
+		"status":      TaskStatusDoing,
+		"assignee_id": assigneeId,
+	}).Update()
+	if err != nil {
+		t.Fatalf("prepare task reminder fixture failed: %v", err)
+	}
+}
+
+func countReminderNotifications(t *testing.T, taskId uint64, receiverId uint64) int {
+	t.Helper()
+	ctx := gctx.New()
+
+	count, err := dao.Notification.Ctx(ctx).
+		Where("receiver_id", receiverId).
+		Where("type", notificationLogic.TypeTaskReminder).
+		Where("related_task_id", taskId).
+		Count()
+	if err != nil {
+		t.Fatalf("count reminder notifications failed: %v", err)
+	}
+	return count
+}
+
+func latestReminderNotification(t *testing.T, taskId uint64, receiverId uint64) entity.Notification {
+	t.Helper()
+	ctx := gctx.New()
+
+	var notification entity.Notification
+	err := dao.Notification.Ctx(ctx).
+		Where("receiver_id", receiverId).
+		Where("type", notificationLogic.TypeTaskReminder).
+		Where("related_task_id", taskId).
+		OrderDesc("id").
+		Limit(1).
+		Scan(&notification)
+	if err != nil {
+		t.Fatalf("query latest reminder notification failed: %v", err)
+	}
+	return notification
+}
+
+func deleteReminderNotification(t *testing.T, notificationId uint64, receiverId uint64) {
+	t.Helper()
+	ctx := gctx.New()
+
+	if notificationId == 0 {
+		return
+	}
+	if _, err := dao.Notification.Ctx(ctx).Where("id", notificationId).Delete(); err != nil {
+		t.Errorf("delete reminder notification failed: %v", err)
+	}
+	if _, err := g.Redis().SRem(ctx, fmt.Sprintf("notification:unread:%d", receiverId), notificationId); err != nil {
+		t.Errorf("remove reminder notification from unread set failed: %v", err)
+	}
+}
+
+func reminderMemberExists(t *testing.T, member string) bool {
+	t.Helper()
+	ctx := gctx.New()
+
+	value, err := g.Redis().Do(ctx, "ZSCORE", taskReminderKey, member)
+	if err != nil {
+		t.Fatalf("check task reminder member failed: %v", err)
+	}
+	return !value.IsNil()
+}
+
+func removeTaskReminderMemberForTest(t *testing.T, member string) {
+	t.Helper()
+	ctx := gctx.New()
+
+	if _, err := g.Redis().Do(ctx, "ZREM", taskReminderKey, member); err != nil {
+		t.Errorf("remove task reminder member failed: %v", err)
+	}
 }

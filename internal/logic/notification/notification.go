@@ -19,6 +19,7 @@ const (
 	TypeTaskAssigned      = "task_assigned"
 	TypeTaskCommented     = "task_commented"
 	TypeTaskMentioned     = "task_mentioned"
+	TypeTaskReminder      = "task_reminder"
 )
 
 // notificationUnreadKey 生成当前用户的未读通知集合 key。

@@ -8,6 +8,7 @@ import (
 	"redis-demo/internal/controller/task"
 	"redis-demo/internal/controller/team"
 	"redis-demo/internal/controller/user"
+	taskLogic "redis-demo/internal/logic/task"
 	"redis-demo/internal/middleware"
 
 	"github.com/gogf/gf/v2/frame/g"
@@ -22,6 +23,10 @@ var (
 		Brief: "start http server",
 		Func: func(ctx context.Context, parser *gcmd.Parser) (err error) {
 			s := g.Server()
+
+			// 启动任务提醒扫描器。它会定时扫描 Redis ZSet 中已经到期的任务提醒。
+			taskLogic.StartReminderScanner(ctx)
+
 			// 将 resource/public 作为静态资源目录，浏览器访问 / 时会加载前端页面。
 			s.SetServerRoot("resource/public")
 			s.Group("/", func(group *ghttp.RouterGroup) {
