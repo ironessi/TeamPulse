@@ -1,434 +1,630 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>RedisForge Console</title>
-  <link rel="stylesheet" href="/resource/css/app.css?v=20260527-3">
+  <title>TeamPulse | 现代团队协作工作台</title>
+  
+  <!-- Premium Fonts & Icons -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- Stylesheets -->
+  <link rel="stylesheet" href="/resource/css/app.css?v=20260602">
 </head>
-<body>
+<body class="theme-dark">
+
+  <!-- Floating Toast Notifications -->
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+
+  <!-- Authentication Overlay Modal -->
+  <div id="authOverlay" class="auth-overlay">
+    <div class="auth-card">
+      <div class="auth-header">
+        <div class="auth-logo">
+          <div class="logo-mark"><i class="fa-solid fa-bolt"></i></div>
+          <h2>TeamPulse</h2>
+        </div>
+        <p>让团队协作重焕生机与活力</p>
+      </div>
+
+      <div class="auth-tabs" role="tablist">
+        <button class="auth-tab active" type="button" data-tab="login" role="tab" aria-selected="true">
+          <i class="fa-solid fa-right-to-bracket"></i> 登录
+        </button>
+        <button class="auth-tab" type="button" data-tab="register" role="tab" aria-selected="false">
+          <i class="fa-solid fa-user-plus"></i> 注册
+        </button>
+      </div>
+
+      <!-- Login Form -->
+      <form id="loginForm" class="auth-form active" data-pane="login">
+        <div class="form-group">
+          <label for="loginUsername">用户名</label>
+          <div class="input-icon-wrapper">
+            <i class="fa-solid fa-user input-icon"></i>
+            <input id="loginUsername" name="username" autocomplete="username" placeholder="请输入用户名" required>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="loginPassword">密码</label>
+          <div class="input-icon-wrapper">
+            <i class="fa-solid fa-lock input-icon"></i>
+            <input id="loginPassword" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="loginCaptcha">验证码</label>
+          <div class="captcha-row">
+            <div class="input-icon-wrapper">
+              <i class="fa-solid fa-shield-halved input-icon"></i>
+              <input id="loginCaptcha" name="captcha" placeholder="6位数字" required>
+            </div>
+            <button id="captchaBtn" class="btn btn-secondary" type="button">
+              <i class="fa-solid fa-paper-plane"></i> 获取
+            </button>
+          </div>
+          <p id="captchaHint" class="hint-text"><i class="fa-solid fa-circle-info"></i> 验证码由 Redis 缓存加速，5 分钟有效</p>
+        </div>
+        <button class="btn btn-primary full-width" type="submit">
+          <span>登录系统</span> <i class="fa-solid fa-arrow-right"></i>
+        </button>
+      </form>
+
+      <!-- Register Form -->
+      <form id="registerForm" class="auth-form" data-pane="register">
+        <div class="form-group">
+          <label for="regUsername">用户名</label>
+          <div class="input-icon-wrapper">
+            <i class="fa-solid fa-user input-icon"></i>
+            <input id="regUsername" name="username" autocomplete="username" placeholder="建议小写字母加数字" required>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="regPassword">密码</label>
+          <div class="input-icon-wrapper">
+            <i class="fa-solid fa-lock input-icon"></i>
+            <input id="regPassword" name="password" type="password" autocomplete="new-password" placeholder="至少 6 位密码" required>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="regNickname">昵称</label>
+          <div class="input-icon-wrapper">
+            <i class="fa-solid fa-address-card input-icon"></i>
+            <input id="regNickname" name="nickname" placeholder="例如：开发组长" required>
+          </div>
+        </div>
+        <button class="btn btn-primary full-width" type="submit">
+          <span>立即注册</span> <i class="fa-solid fa-circle-check"></i>
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Task Detail Drawer (Slides from Right) -->
+  <div id="taskDetailDrawer" class="drawer-overlay">
+    <div class="drawer-content">
+      <div class="drawer-header">
+        <div class="drawer-header-left">
+          <span class="drawer-subtitle" id="selectedTaskHeaderId">#TASK-0</span>
+          <h3 id="selectedTaskHeaderTitle">任务详情</h3>
+        </div>
+        <button id="closeDrawerBtn" class="btn-close" type="button" aria-label="关闭"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <div class="drawer-body">
+        <!-- Status Indicator Grid -->
+        <div class="drawer-status-panel">
+          <span class="status-label">当前状态</span>
+          <span id="selectedTaskStatus" class="task-status todo">未选择</span>
+        </div>
+
+        <p id="selectedTaskMeta" class="drawer-task-meta"></p>
+
+        <!-- Edit Form -->
+        <form id="taskEditForm" class="drawer-edit-form">
+          <div class="form-group">
+            <label for="editTitle">任务标题</label>
+            <input id="editTitle" name="title" required placeholder="输入任务名称">
+          </div>
+          <div class="form-group">
+            <label for="editDescription">任务描述</label>
+            <textarea id="editDescription" name="description" rows="4" required placeholder="任务的具体细节与交付标准..."></textarea>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="editAssignee">负责人 ID</label>
+              <input id="editAssignee" name="assigneeId" type="number" min="0" placeholder="0 表示解除分配">
+            </div>
+            <div class="form-group">
+              <label for="editPriority">优先级</label>
+              <select id="editPriority" name="priority" required>
+                <option value="1">低</option>
+                <option value="2">中</option>
+                <option value="3">高</option>
+              </select>
+            </div>
+          </div>
+          <button class="btn btn-primary full-width" type="submit">
+            <i class="fa-solid fa-floppy-disk"></i> 保存修改
+          </button>
+        </form>
+
+        <div class="drawer-actions">
+          <h4 class="drawer-section-title">流转任务状态</h4>
+          <div class="status-btn-group" aria-label="状态流转操作">
+            <button class="btn btn-secondary task-status-action" data-status="todo" type="button">
+              <i class="fa-regular fa-circle"></i> 设为待处理
+            </button>
+            <button class="btn btn-secondary task-status-action" data-status="doing" type="button">
+              <i class="fa-solid fa-spinner fa-spin-hover"></i> 设为进行中
+            </button>
+            <button class="btn btn-secondary task-status-action" data-status="done" type="button">
+              <i class="fa-regular fa-circle-check"></i> 设为已完成
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Web Shell Layout -->
   <main class="shell">
-    <aside class="sidebar">
+    
+    <!-- Mobile Navigation Topbar -->
+    <header class="mobile-header">
       <div class="brand">
-        <div class="brand-mark">RF</div>
+        <div class="brand-mark"><i class="fa-solid fa-bolt"></i></div>
+        <h1>TeamPulse</h1>
+      </div>
+      <button id="mobileMenuToggle" class="btn-icon" aria-label="菜单"><i class="fa-solid fa-bars"></i></button>
+    </header>
+
+    <!-- LEFT SIDEBAR -->
+    <aside class="sidebar" id="sidebarMenu">
+      <div class="brand">
+        <div class="brand-mark"><i class="fa-solid fa-bolt"></i></div>
         <div>
-          <h1>RedisForge</h1>
-          <p>Collaboration backend lab</p>
+          <h1>TeamPulse</h1>
+          <p>Redis 驱动的高性能工作台</p>
         </div>
       </div>
 
-      <section class="panel session-panel">
-        <div class="panel-title">
-          <span>Session</span>
-          <strong id="sessionState">Offline</strong>
+      <!-- Current Session Summary -->
+      <section class="sidebar-block session-block">
+        <div class="session-header">
+          <div class="online-indicator">
+            <span class="pulse-dot active"></span>
+            <span id="sessionState">连接正常</span>
+          </div>
+          <button id="logoutBtn" class="btn-logout" title="退出登录" type="button">
+            <i class="fa-solid fa-power-off"></i>
+          </button>
         </div>
-        <p id="sessionUser" class="muted">登录后会显示当前用户和缓存 key。</p>
-        <div class="token-meter">
-          <span></span>
+        <div class="session-body">
+          <div class="user-avatar" id="currentUserAvatar">?</div>
+          <div class="user-info">
+            <h4 id="sessionUser">读取中...</h4>
+            <span id="sessionRole" class="badge">研发人员</span>
+          </div>
         </div>
-        <button id="logoutBtn" class="ghost full" type="button">退出登录</button>
       </section>
 
-      <section class="panel redis-panel">
-        <div class="panel-title">
-          <span>Redis Map</span>
+      <!-- Current Team Quick Selection -->
+      <section class="sidebar-block team-select-block">
+        <div class="block-title">
+          <span><i class="fa-solid fa-people-group"></i> 当前团队</span>
+          <button id="toggleNewTeamForm" class="btn-mini" title="创建新团队"><i class="fa-solid fa-plus"></i></button>
         </div>
-        <ul class="redis-list">
-          <li><span class="dot string"></span><b>String</b><small>验证码、JWT 黑名单、在线心跳</small></li>
-          <li><span class="dot cache"></span><b>Cache</b><small>用户资料 Cache Aside</small></li>
-          <li><span class="dot set"></span><b>Set</b><small>团队成员、在线候选人、通知未读数</small></li>
-          <li><span class="dot list"></span><b>List</b><small>团队最近动态</small></li>
-          <li><span class="dot zset"></span><b>ZSet</b><small>热门任务排行榜</small></li>
-          <li><span class="dot ttl"></span><b>TTL</b><small>验证码 5 分钟、心跳 60 秒</small></li>
+        
+        <div class="team-dropdown-wrapper">
+          <select id="teamSelector" class="form-select">
+            <option value="">-- 请选择团队 --</option>
+          </select>
+        </div>
+
+        <!-- Inline New Team Form -->
+        <form id="teamForm" class="inline-team-form" style="display: none;">
+          <div class="input-btn-group">
+            <input name="name" placeholder="输入团队名称" required autocomplete="off">
+            <button class="btn btn-primary" type="submit" title="确认创建"><i class="fa-solid fa-check"></i></button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Sidebar Navigation Menu -->
+      <nav class="sidebar-nav">
+        <button class="nav-item active" data-target="workspace" type="button">
+          <i class="fa-solid fa-chart-line"></i> <span>协作工作台</span>
+        </button>
+        <button class="nav-item" data-target="task-kanban" type="button">
+          <i class="fa-solid fa-table-columns"></i> <span>任务看板</span>
+        </button>
+        <button class="nav-item" data-target="team-members" type="button">
+          <i class="fa-solid fa-users"></i> <span>团队成员</span>
+        </button>
+        <button class="nav-item" data-target="notification-inbox" type="button">
+          <i class="fa-solid fa-bell"></i> <span>通知中心</span>
+          <span id="navUnreadBadge" class="nav-badge" style="display: none;">0</span>
+        </button>
+        <button class="nav-item" data-target="activity-timeline" type="button">
+          <i class="fa-solid fa-bolt"></i> <span>团队动态</span>
+        </button>
+        <button class="nav-item" data-target="dev-debugger" type="button">
+          <i class="fa-solid fa-terminal"></i> <span>调试面板</span>
+        </button>
+      </nav>
+
+      <!-- Redis Key Spec Guide -->
+      <section class="sidebar-block redis-legend">
+        <div class="block-title">
+          <span><i class="fa-solid fa-database"></i> Redis 缓存引擎</span>
+        </div>
+        <ul class="redis-legend-list">
+          <li><span class="legend-dot str"></span> <b>String</b> <small>验证码、黑名单、心跳</small></li>
+          <li><span class="legend-dot cache"></span> <b>Cache</b> <small>用户资料 (Cache Aside)</small></li>
+          <li><span class="legend-dot set"></span> <b>Set</b> <small>在线列表、团队成员、通知</small></li>
+          <li><span class="legend-dot list"></span> <b>List</b> <small>团队操作动态流</small></li>
+          <li><span class="legend-dot zset"></span> <b>ZSet</b> <small>热门任务排行计数</small></li>
         </ul>
-      </section>
-
-      <section class="panel trail-panel">
-        <div class="panel-title">
-          <span>Operation Trail</span>
-        </div>
-        <div id="eventTrail" class="event-trail">
-          <p>等待第一次操作。</p>
-        </div>
       </section>
     </aside>
 
+    <!-- CENTER MAIN WORKSPACE -->
     <section class="workspace">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">Internal collaboration console</p>
-          <h2>身份、团队与任务协作</h2>
+      
+      <!-- Top Metrics Bar -->
+      <section class="metrics-grid" aria-label="核心指标概览">
+        <div class="metric-card">
+          <div class="metric-icon blue"><i class="fa-solid fa-list-check"></i></div>
+          <div class="metric-info">
+            <span>我的任务</span>
+            <strong id="taskMetric">0</strong>
+          </div>
         </div>
-        <div class="top-actions">
-          <button id="refreshProfileBtn" class="secondary" type="button">刷新资料</button>
-          <button id="clearLogBtn" class="link-button" type="button">清空日志</button>
+        <div class="metric-card">
+          <div class="metric-icon green"><i class="fa-solid fa-circle-user"></i></div>
+          <div class="metric-info">
+            <span>在线成员</span>
+            <strong id="presenceMetric">0</strong>
+          </div>
         </div>
-      </header>
-
-      <section class="status-strip" aria-label="系统状态">
-        <div class="status-card">
-          <span>Auth</span>
-          <strong id="authMetric">未登录</strong>
+        <div class="metric-card">
+          <div class="metric-icon orange"><i class="fa-solid fa-bell"></i></div>
+          <div class="metric-info">
+            <span>未读通知</span>
+            <strong id="notificationMetric">0</strong>
+          </div>
         </div>
-        <div class="status-card">
-          <span>User Cache</span>
-          <strong id="cacheMetric">未加载</strong>
-        </div>
-        <div class="status-card">
-          <span>Team Context</span>
-          <strong id="teamMetric">无团队</strong>
-        </div>
-        <div class="status-card">
-          <span>Presence</span>
-          <strong id="presenceMetric">未心跳</strong>
-        </div>
-        <div class="status-card">
-          <span>Activity Feed</span>
-          <strong id="activityMetric">未加载</strong>
-        </div>
-        <div class="status-card">
-          <span>Tasks</span>
-          <strong id="taskMetric">未加载</strong>
-        </div>
-        <div class="status-card">
-          <span>Hot Tasks</span>
-          <strong id="hotMetric">未加载</strong>
-        </div>
-        <div class="status-card">
-          <span>Notifications</span>
-          <strong id="notificationMetric">未加载</strong>
+        <div class="metric-card">
+          <div class="metric-icon purple"><i class="fa-solid fa-fire"></i></div>
+          <div class="metric-info">
+            <span>热门任务</span>
+            <strong id="hotMetric">0</strong>
+          </div>
         </div>
       </section>
 
-      <div class="grid">
-        <section class="panel auth-card">
-          <div class="section-head">
+      <!-- View Containers -->
+      <div class="views-wrapper">
+        
+        <!-- Tab view: workspace & task-kanban combined -->
+        <div id="view-workspace" class="view-pane active">
+          <!-- Kanban Header -->
+          <div class="section-header">
             <div>
-              <span class="section-kicker">Account</span>
-              <h3>登录与注册</h3>
+              <h2>项目协作看板</h2>
+              <p class="section-desc">支持拖拽任务到不同列来流转状态，触发 Redis 和动态日志更新</p>
             </div>
-            <div class="mini-badge">String + TTL</div>
+            <div class="header-actions">
+              <button id="openNewTaskModal" class="btn btn-primary" type="button">
+                <i class="fa-solid fa-plus"></i> 创建新任务
+              </button>
+            </div>
           </div>
 
-          <div class="tabs" role="tablist" aria-label="账号操作">
-            <button class="tab active" type="button" data-tab="login">登录</button>
-            <button class="tab" type="button" data-tab="register">注册</button>
-          </div>
-
-          <form id="loginForm" class="form active" data-pane="login">
-            <label>
-              用户名
-              <input name="username" autocomplete="username" placeholder="test001" required>
-            </label>
-            <label>
-              密码
-              <input name="password" type="password" autocomplete="current-password" placeholder="123456" required>
-            </label>
-            <div class="captcha-row">
-              <label>
-                验证码
-                <input name="captcha" placeholder="6 位数字" required>
-              </label>
-              <button id="captchaBtn" class="secondary" type="button">获取</button>
-            </div>
-            <p id="captchaHint" class="hint">验证码写入 Redis，5 分钟后自动过期。</p>
-            <button class="primary full" type="submit">登录控制台</button>
-          </form>
-
-          <form id="registerForm" class="form" data-pane="register">
-            <label>
-              用户名
-              <input name="username" autocomplete="username" placeholder="new_user" required>
-            </label>
-            <label>
-              密码
-              <input name="password" type="password" autocomplete="new-password" placeholder="至少 6 位" required>
-            </label>
-            <label>
-              昵称
-              <input name="nickname" placeholder="例如：浩铭" required>
-            </label>
-            <button class="primary full" type="submit">创建账号</button>
-          </form>
-        </section>
-
-        <section class="panel profile-card">
-          <div class="section-head">
-            <div>
-              <span class="section-kicker">Identity</span>
-              <h3>当前用户</h3>
-            </div>
-            <div class="mini-badge">Cache Aside</div>
-          </div>
-          <div class="profile-box">
-            <div class="avatar" id="profileAvatar">?</div>
-            <div>
-              <h3 id="profileName">未登录</h3>
-              <p id="profileMeta" class="muted">登录后读取 user:profile:{id}。</p>
-            </div>
-          </div>
-          <form id="profileForm" class="inline-form">
-            <label>
-              新昵称
-              <input name="nickname" placeholder="更新后删除用户缓存" required>
-            </label>
-            <button class="secondary" type="submit">更新</button>
-          </form>
-        </section>
-
-        <section class="panel team-card wide-card">
-          <div class="section-head">
-            <div>
-              <span class="section-kicker">Workspace</span>
-              <h3>团队成员</h3>
-            </div>
-            <div class="mini-badge">Set + TTL</div>
-          </div>
-          <div class="team-layout">
-            <div class="team-forms">
-              <form id="teamForm" class="form active">
-                <label>
-                  团队名称
-                  <input name="name" placeholder="研发一组" required>
-                </label>
-                <button class="primary full" type="submit">创建团队</button>
-              </form>
-              <form id="memberForm" class="inline-form stacked-mobile">
-                <label>
-                  团队 ID
-                  <input name="teamId" inputmode="numeric" placeholder="1" required>
-                </label>
-                <label>
-                  用户 ID
-                  <input name="userId" inputmode="numeric" placeholder="2" required>
-                </label>
-                <button class="secondary" type="submit">添加成员</button>
-              </form>
-              <button id="loadMembersBtn" class="secondary full member-load" type="button">查看成员</button>
-            </div>
-            <div>
-              <div class="list-title">成员列表</div>
-              <div id="memberList" class="member-list">创建或填写团队 ID 后查看成员。</div>
-            </div>
-          </div>
-        </section>
-
-        <section class="panel task-card wide-card">
-          <div class="section-head">
-            <div>
-              <span class="section-kicker">Task Workflow</span>
-              <h3>任务流转</h3>
-            </div>
-            <div class="mini-badge">MySQL + List + ZSet</div>
-          </div>
-          <div class="task-layout">
-            <form id="taskCreateForm" class="task-composer">
-              <div class="list-title">创建任务</div>
-              <label>
-                团队 ID
-                <input name="teamId" inputmode="numeric" placeholder="1" required>
-              </label>
-              <label>
-                任务标题
-                <input name="title" placeholder="例如：完善部署文档" required>
-              </label>
-              <label>
-                任务描述
-                <textarea name="description" rows="3" placeholder="补充目标与交付内容" required></textarea>
-              </label>
-              <div class="task-form-fields">
-                <label>
-                  负责人 ID
-                  <input name="assigneeId" inputmode="numeric" placeholder="0 表示暂不分配" value="0">
-                </label>
-                <label>
-                  优先级
-                  <select name="priority" required>
-                    <option value="1">低</option>
-                    <option value="2" selected>中</option>
-                    <option value="3">高</option>
-                  </select>
-                </label>
+          <!-- Drag and Drop Kanban Board -->
+          <div class="kanban-board">
+            <!-- TODO COLUMN -->
+            <div class="kanban-column" data-status="todo">
+              <div class="column-header">
+                <span class="column-dot todo"></span>
+                <h3>待处理</h3>
+                <span class="column-count" id="count-todo">0</span>
               </div>
-              <button class="primary full" type="submit">创建任务</button>
-            </form>
-            <div>
-              <div class="task-toolbar">
-                <label>
-                  团队 ID
-                  <input id="taskTeamId" inputmode="numeric" placeholder="1">
-                </label>
-                <button id="loadTasksBtn" class="secondary" type="button">刷新任务</button>
+              <div class="kanban-cards-container" id="kanban-todo">
+                <!-- Task cards dynamic render -->
               </div>
-              <div id="taskList" class="task-list">
-                选择团队后查看任务列表。
+            </div>
+
+            <!-- DOING COLUMN -->
+            <div class="kanban-column" data-status="doing">
+              <div class="column-header">
+                <span class="column-dot doing"></span>
+                <h3>进行中</h3>
+                <span class="column-count" id="count-doing">0</span>
+              </div>
+              <div class="kanban-cards-container" id="kanban-doing">
+                <!-- Task cards dynamic render -->
+              </div>
+            </div>
+
+            <!-- DONE COLUMN -->
+            <div class="kanban-column" data-status="done">
+              <div class="column-header">
+                <span class="column-dot done"></span>
+                <h3>已完成</h3>
+                <span class="column-count" id="count-done">0</span>
+              </div>
+              <div class="kanban-cards-container" id="kanban-done">
+                <!-- Task cards dynamic render -->
               </div>
             </div>
           </div>
-          <section class="task-detail" aria-live="polite">
-            <div class="task-detail-head">
-              <div>
-                <span class="list-title">任务详情与编辑</span>
-                <strong id="selectedTaskTitle">从列表中查看一条任务。</strong>
-              </div>
-              <span id="selectedTaskStatus" class="task-status neutral">未选择</span>
+        </div>
+
+        <!-- Tab view: Team Members -->
+        <div id="view-team-members" class="view-pane">
+          <div class="section-header">
+            <div>
+              <h2>团队成员管理</h2>
+              <p class="section-desc">维护团队成员名单，显示最近活跃心跳</p>
             </div>
-            <div id="taskDetailControls" hidden>
-              <p id="selectedTaskMeta" class="task-detail-meta"></p>
-              <form id="taskEditForm" class="task-edit-form">
-                <label>
-                  标题
-                  <input name="title" required>
-                </label>
-                <label>
-                  描述
-                  <textarea name="description" rows="3" required></textarea>
-                </label>
-                <div class="task-form-fields">
-                  <label>
-                    负责人 ID
-                    <input name="assigneeId" inputmode="numeric" placeholder="0 表示解除分配">
-                  </label>
-                  <label>
-                    优先级
-                    <select name="priority" required>
-                      <option value="1">低</option>
-                      <option value="2">中</option>
-                      <option value="3">高</option>
-                    </select>
-                  </label>
+          </div>
+          
+          <div class="team-members-grid">
+            <!-- Add Member Box -->
+            <div class="card add-member-card">
+              <h3><i class="fa-solid fa-user-plus"></i> 添加成员</h3>
+              <form id="memberForm">
+                <div class="form-group">
+                  <label for="memberUserId">用户 ID</label>
+                  <input id="memberUserId" name="userId" type="number" placeholder="输入用户的系统数字 ID" required>
                 </div>
-                <button class="secondary" type="submit">保存任务信息</button>
+                <button class="btn btn-primary full-width" type="submit">
+                  <i class="fa-solid fa-plus"></i> 确认添加
+                </button>
               </form>
-              <div class="task-status-actions" aria-label="更新任务状态">
-                <button class="secondary task-status-action" data-status="todo" type="button">设为待处理</button>
-                <button class="secondary task-status-action" data-status="doing" type="button">设为进行中</button>
-                <button class="secondary task-status-action" data-status="done" type="button">设为已完成</button>
+            </div>
+
+            <!-- Members List Card -->
+            <div class="card members-list-card">
+              <div class="card-header">
+                <h3><i class="fa-solid fa-list"></i> 成员列表</h3>
+                <button id="loadMembersBtn" class="btn btn-secondary btn-small" type="button">
+                  <i class="fa-solid fa-rotate"></i> 刷新
+                </button>
+              </div>
+              <div id="memberList" class="member-list-container">
+                <!-- Members items render -->
               </div>
             </div>
-          </section>
-        </section>
+          </div>
+        </div>
 
-        <section class="panel notification-card wide-card">
-          <div class="section-head">
+        <!-- Tab view: Notifications -->
+        <div id="view-notification-inbox" class="view-pane">
+          <div class="section-header">
             <div>
-              <span class="section-kicker">Notification Inbox</span>
-              <h3>通知中心</h3>
+              <h2>通知中心</h2>
+              <p class="section-desc">任务指派与状态变更的消息中心，由 Redis Set 维护已读状态</p>
             </div>
-            <div class="mini-badge">MySQL + Set</div>
-          </div>
-          <div class="notification-toolbar">
-            <p class="muted">任务指派会写入通知，未读数量由 Redis Set 加速统计。</p>
-            <div class="notification-actions">
-              <span id="unreadBadge" class="unread-badge">未加载</span>
-              <button id="loadNotificationsBtn" class="secondary" type="button">刷新通知</button>
+            <div class="header-actions">
+              <button id="loadNotificationsBtn" class="btn btn-secondary" type="button">
+                <i class="fa-solid fa-rotate"></i> 刷新通知
+              </button>
             </div>
           </div>
-          <div id="notificationList" class="notification-list">
-            登录后可查看分配给你的任务通知。
-          </div>
-        </section>
 
-        <section class="panel activity-card wide-card">
-          <div class="section-head">
-            <div>
-              <span class="section-kicker">Recent Activity</span>
-              <h3>团队动态</h3>
+          <div class="card full-width-card">
+            <div id="notificationList" class="notification-list-container">
+              <!-- Notifications dynamic render -->
             </div>
-            <div class="mini-badge">List + LTRIM</div>
           </div>
-          <div class="activity-toolbar">
-            <label>
-              团队 ID
-              <input id="activityTeamId" inputmode="numeric" placeholder="1">
-            </label>
-            <button id="loadActivitiesBtn" class="secondary" type="button">刷新动态</button>
-          </div>
-          <div id="activityList" class="activity-list">暂无动态。</div>
-        </section>
+        </div>
 
-        <section class="panel hot-task-card wide-card">
-          <div class="section-head">
+        <!-- Tab view: Activities -->
+        <div id="view-activity-timeline" class="view-pane">
+          <div class="section-header">
             <div>
-              <span class="section-kicker">Trending Tasks</span>
-              <h3>热门任务</h3>
+              <h2>团队动态流</h2>
+              <p class="section-desc">通过 Redis List 与 LTRIM 存储的最近团队协作轨迹</p>
             </div>
-            <div class="mini-badge">Sorted Set</div>
+            <div class="header-actions">
+              <button id="loadActivitiesBtn" class="btn btn-secondary" type="button">
+                <i class="fa-solid fa-rotate"></i> 刷新动态
+              </button>
+            </div>
           </div>
-          <div class="hot-task-toolbar">
-            <label>
-              团队 ID
-              <input id="hotTaskTeamId" inputmode="numeric" placeholder="1">
-            </label>
-            <button id="loadHotTasksBtn" class="secondary" type="button">刷新排行</button>
-          </div>
-          <!-- 查看任务详情会增加该任务的 Redis 热度，并立即反映到当前排行中。 -->
-          <div id="hotTaskList" class="hot-task-list">
-            查看任务详情后，这里会显示热门任务排行。
-          </div>
-        </section>
 
-        <section class="panel presence-card">
-          <div class="section-head">
-            <div>
-              <span class="section-kicker">Presence</span>
-              <h3>在线状态</h3>
+          <div class="card full-width-card">
+            <div id="activityList" class="activity-timeline-container">
+              <!-- Activities dynamic render -->
             </div>
-            <div class="mini-badge">双 key</div>
           </div>
-          <form id="heartbeatForm" class="inline-form">
-            <label>
-              团队 ID
-              <input name="teamId" inputmode="numeric" placeholder="1" required>
-            </label>
-            <button class="primary" type="submit">发送心跳</button>
-          </form>
-          <button id="loadOnlineBtn" class="secondary full member-load" type="button">查看在线成员</button>
-          <div id="onlineList" class="member-list">心跳后 60 秒内会显示在线。</div>
-        </section>
+        </div>
 
-        <section class="panel flow-card">
-          <div class="section-head">
+        <!-- Tab view: Debugger -->
+        <div id="view-dev-debugger" class="view-pane">
+          <div class="section-header">
             <div>
-              <span class="section-kicker">Data Flow</span>
-              <h3>这次操作会打到哪里</h3>
+              <h2>开发者调试台</h2>
+              <p class="section-desc">监控前后端请求响应数据，解析缓存键的更新原理</p>
             </div>
           </div>
-          <div class="flow-map">
-            <div class="flow-node active">
-              <b>HTTP</b>
-              <span>规范路由</span>
+          
+          <div class="debugger-grid">
+            <div class="card flow-map-card">
+              <h3><i class="fa-solid fa-network-wired"></i> 接口数据流模型</h3>
+              <div class="flow-chart">
+                <div class="flow-step">
+                  <div class="step-icon"><i class="fa-solid fa-globe"></i></div>
+                  <span>前端请求</span>
+                  <small>HTTP API</small>
+                </div>
+                <div class="flow-arrow"><i class="fa-solid fa-circle-chevron-right"></i></div>
+                <div class="flow-step">
+                  <div class="step-icon"><i class="fa-solid fa-gears"></i></div>
+                  <span>后端逻辑</span>
+                  <small>GoFrame v2</small>
+                </div>
+                <div class="flow-arrow"><i class="fa-solid fa-circle-chevron-right"></i></div>
+                <div class="flow-step highlight">
+                  <div class="step-icon redis-icon"><i class="fa-solid fa-cube"></i></div>
+                  <span>Redis</span>
+                  <small id="flowRedis">就绪</small>
+                </div>
+                <div class="flow-arrow"><i class="fa-solid fa-circle-chevron-right"></i></div>
+                <div class="flow-step">
+                  <div class="step-icon"><i class="fa-solid fa-database"></i></div>
+                  <span>数据库</span>
+                  <small>MySQL</small>
+                </div>
+              </div>
+              <div id="eventTrail" class="trail-logs">
+                <div class="trail-header">近期操作路径 (Redis 关键操作):</div>
+                <div class="trail-body" id="eventTrailBody">
+                  <p class="text-muted">暂无操作轨迹</p>
+                </div>
+              </div>
             </div>
-            <div class="flow-line"></div>
-            <div class="flow-node">
-              <b>Logic</b>
-              <span>业务校验</span>
-            </div>
-            <div class="flow-line"></div>
-            <div class="flow-node redis-node">
-              <b>Redis</b>
-              <span id="flowRedis">等待操作</span>
-            </div>
-            <div class="flow-line"></div>
-            <div class="flow-node">
-              <b>MySQL</b>
-              <span>权威数据</span>
-            </div>
-          </div>
-        </section>
 
-        <section class="panel log-card">
-          <div class="section-head">
-            <div>
-              <span class="section-kicker">Debug</span>
-              <h3>请求日志</h3>
+            <div class="card log-console-card">
+              <div class="card-header">
+                <h3><i class="fa-solid fa-code"></i> 请求日志日志</h3>
+                <button id="clearLogBtn" class="btn btn-secondary btn-small" type="button">清空日志</button>
+              </div>
+              <div class="console-wrapper">
+                <pre id="logOutput">等待第一次网络操作...</pre>
+              </div>
             </div>
           </div>
-          <pre id="logOutput">等待操作...</pre>
-        </section>
+        </div>
       </div>
+      
+      <!-- General Bottom Row: Hot Tasks and Online Presence (Always visible on desktop dashboard) -->
+      <section class="dashboard-side-grid">
+        <!-- Hot Tasks leaderboard -->
+        <div class="card leaderboard-card">
+          <div class="card-header">
+            <h3><i class="fa-solid fa-fire"></i> 热门任务排行</h3>
+            <button id="loadHotTasksBtn" class="btn btn-secondary btn-small" type="button">
+              <i class="fa-solid fa-rotate"></i> 刷新排行
+            </button>
+          </div>
+          <p class="hint-text"><i class="fa-solid fa-circle-info"></i> 查看任务详情将使用 Redis ZINCRBY 累加任务热度分</p>
+          <div id="hotTaskList" class="hot-list-container">
+            <!-- Hot tasks list render -->
+          </div>
+        </div>
+
+        <!-- Online presence heartbeat dashboard widget -->
+        <div class="card online-presence-card">
+          <div class="card-header">
+            <h3><i class="fa-solid fa-signal"></i> 实时在线成员</h3>
+            <button id="loadOnlineBtn" class="btn btn-secondary btn-small" type="button">
+              <i class="fa-solid fa-rotate"></i> 刷新
+            </button>
+          </div>
+          <div class="heartbeat-badge">
+            <span class="last-heartbeat-time">最近心跳时间: <strong id="heartbeatTime">未激活</strong></span>
+          </div>
+          <div id="onlineList" class="online-list-container">
+            <!-- Online users render -->
+          </div>
+        </div>
+      </section>
+
     </section>
+
+    <!-- RIGHT DRAWER / PROFILE PANEL -->
+    <aside class="right-panel">
+      <!-- Current User Profile Form -->
+      <div class="panel-section profile-card">
+        <h3><i class="fa-solid fa-circle-user"></i> 个人资料 (Cache Aside)</h3>
+        <div class="profile-box">
+          <div class="avatar-large" id="profileAvatar">?</div>
+          <div class="profile-details">
+            <h4 id="profileName">请先登录</h4>
+            <p id="profileMeta" class="text-muted">user:profile:{userId}</p>
+          </div>
+        </div>
+        
+        <form id="profileForm" class="profile-form">
+          <div class="form-group">
+            <label for="newNickname">修改昵称</label>
+            <div class="input-btn-group">
+              <input id="newNickname" name="nickname" placeholder="输入新昵称" required autocomplete="off">
+              <button class="btn btn-secondary" type="submit">更新</button>
+            </div>
+            <p class="hint-text">更新昵称时，后端删除 Redis 缓存以保持 Cache Aside 同步</p>
+          </div>
+        </form>
+      </div>
+
+      <!-- Quick Action: Task Creator Modal Trigger -->
+      <div class="panel-section quick-task-block">
+        <h3><i class="fa-solid fa-circle-plus"></i> 快捷新建任务</h3>
+        <button id="quickCreateTaskBtn" class="btn btn-primary full-width" type="button">
+          <i class="fa-solid fa-plus"></i> 新建任务
+        </button>
+      </div>
+
+      <!-- Compact Notifications Box -->
+      <div class="panel-section notification-compact">
+        <div class="section-title-row">
+          <h3><i class="fa-solid fa-inbox"></i> 未读通知</h3>
+          <span id="unreadBadge" class="unread-count-badge">0</span>
+        </div>
+        <div id="notificationListCompact" class="compact-list">
+          <p class="text-muted">暂无未读消息</p>
+        </div>
+      </div>
+    </aside>
+
   </main>
-  <script src="/resource/js/app.js?v=20260527-3"></script>
+
+  <!-- Create Task Dialog Modal -->
+  <div id="newTaskModal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-circle-plus"></i> 创建新任务</h3>
+        <button id="closeNewTaskModal" class="btn-close" type="button"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <form id="taskCreateForm">
+        <div class="form-group">
+          <label for="taskTitle">任务标题</label>
+          <input id="taskTitle" name="title" placeholder="输入标题，例如：重构后端 Redis 模块" required>
+        </div>
+        <div class="form-group">
+          <label for="taskDesc">描述</label>
+          <textarea id="taskDesc" name="description" rows="3" placeholder="简要描述任务目标与验收条件" required></textarea>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="taskAssignee">负责人 ID</label>
+            <input id="taskAssignee" name="assigneeId" type="number" placeholder="负责人ID" value="0">
+          </div>
+          <div class="form-group">
+            <label for="taskPriority">优先级</label>
+            <select id="taskPriority" name="priority" required>
+              <option value="1">低</option>
+              <option value="2" selected>中</option>
+              <option value="3">高</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="cancelNewTask" class="btn btn-secondary" type="button">取消</button>
+          <button class="btn btn-primary" type="submit">确认创建</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="/resource/js/app.js?v=20260602"></script>
 </body>
 </html>
