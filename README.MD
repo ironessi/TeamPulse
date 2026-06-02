@@ -14,6 +14,8 @@ TeamPulse 是一个基于 GoFrame、MySQL 和 Redis 的团队协作后端练习�
 http://127.0.0.1:8000/
 ```
 
+![TeamPulse 前端主页面](docs/images/teampulse-home.png)
+
 主页面是一个深色 TeamPulse 协作工作台，登录后展示：
 
 - 左侧：当前会话、团队选择、导航菜单和 Redis 能力图例
