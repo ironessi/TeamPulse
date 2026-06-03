@@ -170,7 +170,24 @@ func CreateNotification(
 		RelatedTaskId: relatedTaskId,
 		IsRead:        0, //默认未读
 	}).Insert()
-	if err != nil {
+	if err != nil { // MySQL 写入失败时，将通知内容放入重试队列，等待后台 worker 后续重试创建。
+		// 1. 组装 RetryNotificationPayload
+		// 2. 调用 EnqueueNotificationRetry
+		enqueueErr := EnqueueNotificationRetry(ctx, RetryNotificationPayload{
+			ReceiverId:       receiverId,
+			ActorId:          actorId,
+			NotificationType: notificationType,
+			Content:          content,
+			RelatedTaskId:    relatedTaskId,
+			RetryCount:       0,
+		})
+
+		// 3. 如果入队也失败，返回原始 err 或入队 err？
+		if enqueueErr != nil {
+			return enqueueErr
+		}
+
+		// 4. 返回 err
 		return err
 	}
 

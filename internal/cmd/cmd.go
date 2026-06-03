@@ -8,6 +8,7 @@ import (
 	"redis-demo/internal/controller/task"
 	"redis-demo/internal/controller/team"
 	"redis-demo/internal/controller/user"
+	notificationLogic "redis-demo/internal/logic/notification"
 	taskLogic "redis-demo/internal/logic/task"
 	"redis-demo/internal/middleware"
 
@@ -26,6 +27,9 @@ var (
 
 			// 启动任务提醒扫描器。它会定时扫描 Redis ZSet 中已经到期的任务提醒。
 			taskLogic.StartReminderScanner(ctx)
+
+			// 2. 启动通知重试 worker
+			notificationLogic.StartNotificationRetryWorker(ctx)
 
 			// 将 resource/public 作为静态资源目录，浏览器访问 / 时会加载前端页面。
 			s.SetServerRoot("resource/public")

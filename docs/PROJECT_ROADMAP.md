@@ -983,7 +983,76 @@ task:likes:{taskId}
 是否点赞：SISMEMBER task:likes:{taskId} userId
 ```
 
+当前已完成基础闭环：
+
+- 新增 `POST /tasks/{taskId}/like` 点赞任务。
+- 新增 `DELETE /tasks/{taskId}/like` 取消点赞。
+- 新增 `GET /tasks/{taskId}/like-status` 查询当前用户是否点赞和当前点赞数。
+- 点赞前会校验任务存在，并校验当前用户属于任务所在团队。
+- 使用 Redis Set 去重，同一用户重复点赞不会重复计数。
+- 取消点赞使用 `SREM`，未点赞时取消仍返回成功，保持幂等。
+
+已补充自动测试：
+
+- 重复点赞不增加点赞数。
+- 取消点赞后点赞数归零，重复取消仍成功。
+- 点赞状态能正确反映当前用户是否点赞和当前点赞数。
+- 非团队成员不能点赞、取消点赞或查询点赞状态。
+- 任务不存在时返回“任务不存在”。
+
+已验证：
+
+```bash
+go test ./internal/logic/task -run 'TestLikeTask|TestUnlikeTask|TestGetLikeStatus|TestTaskLike' -count=1
+go test ./internal/logic/task -count=1
+go test ./... -count=1
+```
+
+已完成 HTTP 联调：
+
+- 初始 `GET /tasks/{taskId}/like-status` 返回 `isLiked=false`、`likeCount=0`。
+- 首次 `POST /tasks/{taskId}/like` 返回 `likeCount=1`。
+- 重复点赞仍返回 `likeCount=1`，Redis `task:likes:{taskId}` 中只保留当前用户一份。
+- 点赞后查询状态返回 `isLiked=true`、`likeCount=1`。
+- `DELETE /tasks/{taskId}/like` 返回 `likeCount=0`。
+- 重复取消点赞仍返回 `likeCount=0`。
+- 非团队成员点赞被拒绝，任务不存在时返回“任务不存在”。
+- 联调产生的临时用户、团队、成员关系、任务和 Redis key 已清理。
+
 这些能力不应一次性并行开发；先从缓存穿透开始，每完成一个小阶段都补测试、联调和文档记录。
+
+### 已完成：通知重试队列工具
+
+目标：练习 Redis List 的队列语义，为后续“通知创建失败后重试”预留基础工具。
+
+计划 key：
+
+```text
+notification:retry:queue
+```
+
+当前已完成基础工具：
+
+- 新增 `RetryNotificationPayload`，保存接收人、触发人、通知类型、内容、关联任务和重试次数。
+- 新增 `EnqueueNotificationRetry(ctx, payload)`，将 payload 序列化为 JSON 后通过 `RPUSH` 写入 Redis 队列。
+- 新增 `DequeueNotificationRetry(ctx)`，通过 `LPOP` 从 Redis 队列取出一条 payload。
+- 队列为空时返回 `nil, nil`，表示没有待重试通知，不作为错误。
+- 使用 `RPUSH + LPOP` 保持 FIFO：先入队的通知先被取出。
+
+已补充自动测试：
+
+- 连续入队两条通知后，队列长度为 2。
+- 出队顺序符合 FIFO。
+- payload JSON 反序列化后字段保持一致。
+- 空队列出队返回 `nil, nil`。
+
+已验证：
+
+```bash
+go test ./internal/logic/notification -run 'TestNotificationRetryQueue' -count=1
+go test ./internal/logic/notification -count=1
+go test ./... -count=1
+```
 
 ## 13. 后续协作增强备选
 
@@ -1090,21 +1159,24 @@ task:likes:{taskId}
 | 高级缓存 | 任务详情空值缓存、缓存失效、TTL 抖动、互斥重建已完成 | `go test ./internal/logic/task -count=1` |
 | 分布式锁 | 通用 `internal/logic/lock`、Lua 原子释放已完成 | `go test ./internal/logic/lock -count=1` |
 | 工单评论 | 创建评论、评论列表、团队动态、评论通知、提及通知均已完成后端验收 | `go test ./internal/logic/task -count=1` 与 HTTP 联调 |
-| 延迟提醒 | 设置提醒、扫描到期提醒、后台 scanner、scanner 分布式锁均已完成 | `go test ./... -count=1` 与服务级联调 |
+| 延迟提醒 | 设置提醒、取消提醒、扫描到期提醒、后台 scanner、scanner 分布式锁均已完成 | `go test ./... -count=1` 与服务级联调 |
+| 任务点赞 | 点赞、取消点赞、点赞状态查询已完成后端测试与 HTTP 联调 | `go test ./... -count=1` 与 HTTP 联调 |
+| 通知重试队列 | Redis List 入队、出队、FIFO 和空队列处理已完成 | `go test ./internal/logic/notification -count=1` |
 
-### 当前第一步：延迟提醒体验收口
+### 当前第一步：通知重试队列体验收口
 
-目标：延迟提醒后端主链路已经跑通，下一步只做一个小体验收口，避免继续把功能摊大。
+目标：通知重试队列基础工具已完成自动测试，下一步再决定是否接入真实通知失败路径或后台重试 worker。
 
 当前拆分：
 
-1. 可选小切片一：取消提醒接口，`DELETE /tasks/{taskId}/reminder`。
-2. 可选小切片二：前端任务详情里增加设置提醒入口。
-3. 两者不要同一天并行开发，先选一个完成测试和联调。
+1. 已完成小切片一：`EnqueueNotificationRetry` 使用 `RPUSH` 入队。
+2. 已完成小切片二：`DequeueNotificationRetry` 使用 `LPOP` 出队。
+3. 已完成小切片三：空队列返回 `nil, nil`。
+4. 已完成自动测试，验证 FIFO、payload 完整性和空队列行为。
 
-### 明日优先级
+### 下一步优先级
 
-优先建议做取消提醒接口。它和已完成的设置提醒、扫描提醒形成完整管理闭环，但实现范围仍然很小。
+优先建议先不急着扩大：下一步可以接一个最小后台重试 worker，或进入项目最终 README/演示收口。
 
 ## 18. 每日进展记录
 
@@ -1208,13 +1280,66 @@ task:likes:{taskId}
 - 联调产生的通知、未读集合成员、scanner 锁和 reminder 已清理。
 - 验证通过：`go test ./internal/logic/task -run 'TestScanDueRemindersWithLock' -count=1`、`go test ./internal/logic/task ./internal/logic/lock -count=1` 与 `go test ./... -count=1`。
 
+### 2026-06-03：取消提醒接口小阶段
+
+目标：延迟提醒体验收口，补齐取消提醒接口。
+
+已完成：
+
+- 新增 `DELETE /tasks/{taskId}/reminder` API 与 Controller。
+- 新增 `CancelReminder(ctx, userId, taskId)` Logic，先查 MySQL 任务，再校验当前用户属于任务团队。
+- 权限通过后执行 `ZREM task:reminder taskId`，不存在 reminder 时仍返回成功，保证重复取消幂等。
+- 非团队成员取消会返回“你没有权限取消该任务提醒”，任务不存在会返回“任务不存在”。
+- 补充自动测试，覆盖成员取消成功、重复取消幂等、非成员拒绝、任务不存在拒绝。
+- 验证通过：`go test ./internal/logic/task -run 'TestCancelReminder' -count=1`、`go test ./internal/logic/task -count=1` 与 `go test ./... -count=1`。
+- 完成 HTTP 联调：临时用户创建团队、添加成员、创建任务、设置提醒后，成员取消成功并从 `task:reminder` 删除；重复取消继续成功；非团队成员取消被拒绝且 Redis reminder 保留；不存在任务返回“任务不存在”。
+- 联调产生的临时用户、团队、成员关系、任务和 Redis key 已清理。
+
+下一步：
+
+1. 决定是否补前端任务详情里的设置/取消提醒入口。
+2. 如果暂不做前端，则进入下一个 Redis 练习小切片。
+
+### 2026-06-03：点赞与通知重试收尾
+
+目标：完成最后几个后端 Redis 小切片，并形成可测试、可联调、可讲解的项目闭环。
+
+已完成：
+
+- 新增任务点赞接口：`POST /tasks/{taskId}/like`。
+- 新增取消点赞接口：`DELETE /tasks/{taskId}/like`。
+- 新增点赞状态接口：`GET /tasks/{taskId}/like-status`，返回当前用户是否点赞和当前点赞数。
+- 点赞使用 Redis Set `task:likes:{taskId}`，同一用户重复点赞不会重复计数；取消点赞保持幂等。
+- 完成点赞自动测试，覆盖重复点赞、重复取消、状态查询、非团队成员拒绝和任务不存在。
+- 完成点赞 HTTP 联调，验证 Redis Set 中只保留一份 userId，联调产生的临时用户、团队、任务和 Redis key 已清理。
+- 新增通知重试队列 `notification:retry:queue`，使用 `RPUSH + LPOP` 实现 FIFO。
+- 新增 `RetryNotificationPayload`、`EnqueueNotificationRetry`、`DequeueNotificationRetry` 和 `ProcessOneNotificationRetry`。
+- 新增通知重试后台 worker：服务启动时每 5 秒尝试处理一条重试通知。
+- 给通知重试 worker 接入分布式锁 `lock:notification:retry:worker`，避免多实例重复处理。
+- `CreateNotification` 在 MySQL 插入失败时会将通知 payload 写入重试队列，等待 worker 后续重试创建。
+- 完成通知重试服务级联调：手工 `RPUSH notification:retry:queue` 后，worker 自动创建 MySQL 通知、写入 `notification:unread:{receiverId}`，并清空队列。
+- 更新 README，补充点赞接口、通知重试队列、Redis key、测试覆盖和手工验证命令。
+
+验证通过：
+
+```bash
+go test ./internal/logic/notification -count=1
+go test ./internal/cmd ./internal/logic/task -count=1
+go test ./... -count=1
+```
+
+前端收尾说明：
+
+- 通知重试属于后台稳定性能力，没有前端入口。
+- 点赞接口已完成后端测试和 HTTP 联调，但今天不额外扩展前端 UI，避免在收尾阶段引入新的页面交互风险。
+
 ### 2026-06-04：下一步任务规划
 
-目标：延迟提醒体验收口，优先补取消提醒接口。
+目标：项目进入最终收口阶段，优先做文档、演示和可展示性整理。
 
-1. 先设计 `DELETE /tasks/{taskId}/reminder`。
-2. Logic 校验任务存在、当前用户属于任务所在团队。
-3. 已完成任务或不存在 reminder 时保持幂等，直接返回成功或明确错误策略。
-4. 执行 `ZREM task:reminder taskId` 取消待提醒任务。
-5. 补充测试：成员取消成功、非成员拒绝、任务不存在拒绝、重复取消幂等。
-6. 这一阶段暂不做前端，等接口稳定后再接页面入口。
+建议顺序：
+
+1. 整理 README 的项目亮点：Redis String、Set、List、ZSet、锁、限流、延迟队列分别对应哪些业务。
+2. 整理一组完整演示 curl：登录、团队、任务、评论、通知、提醒、点赞、重试队列。
+3. 可选补前端点赞入口；如果做前端，只接 `like-status`、`POST /like`、`DELETE /like` 三个已验收接口。
+4. 最后做一次全量测试和服务级 smoke test，准备项目封版提交。

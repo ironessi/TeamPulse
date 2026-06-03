@@ -44,6 +44,7 @@ http://127.0.0.1:8000/
 - 团队创建、添加成员和成员缓存
 - 团队在线成员心跳与查询
 - 任务创建、查询、编辑、状态流转和热门排行
+- 任务点赞、取消点赞和点赞状态查询
 - 任务评论、评论列表、评论动态和提及通知
 - 任务指派通知、任务状态变化通知、评论通知和提醒通知
 - 通知列表、未读数和标记已读
@@ -52,6 +53,7 @@ http://127.0.0.1:8000/
 - 任务详情缓存穿透、缓存失效、TTL 随机抖动和缓存击穿互斥重建
 - 通用 Redis 分布式锁工具
 - 任务延迟提醒：ZSet 写入、到期扫描、后台 scanner 和 scanner 分布式锁
+- 通知重试队列：List 入队、FIFO 出队、后台 worker 和 worker 分布式锁
 - 控制台前端页面，位于 `resource/public`
 
 ## Redis 使用点
@@ -66,11 +68,14 @@ http://127.0.0.1:8000/
 | 团队在线候选成员 | `presence:team:{teamId}` | Set | 查询在线成员时过滤失效心跳 |
 | 团队动态流 | `team:activities:{teamId}` | List | 最近团队操作 |
 | 热门任务排行 | `team:task:hot:{teamId}` | Sorted Set | 任务浏览和操作热度 |
+| 任务点赞集合 | `task:likes:{taskId}` | Set | 成员是 userId，天然去重 |
 | 通知未读集合 | `notification:unread:{userId}` | Set | 成员是 notificationId |
+| 通知重试队列 | `notification:retry:queue` | List | 失败通知 payload，FIFO 重试 |
 | 任务详情缓存 | `task:detail:{taskId}` | String(JSON / `__NULL__`) | Cache Aside、空值缓存、TTL 抖动 |
 | 任务详情互斥锁 | `lock:task:detail:{taskId}` | String NX | 防止热点缓存击穿 |
 | 任务提醒队列 | `task:reminder` | Sorted Set | score 为提醒时间戳，member 为 taskId |
 | 提醒扫描锁 | `lock:task:reminder:scanner` | String NX | 多实例下避免重复扫描提醒 |
+| 通知重试 worker 锁 | `lock:notification:retry:worker` | String NX | 多实例下避免重复处理重试队列 |
 | 创建任务限流 | `rate:task:create:{userId}:{minute}` | String Counter | 每用户每分钟最多 10 次 |
 | 登录限流 | `rate:login:{ip}:{minute}` | String Counter | 每 IP 每分钟最多 5 次 |
 
@@ -149,6 +154,8 @@ go test ./... -count=1
 - 工单评论、提及通知和负责人评论通知
 - 任务详情缓存、缓存穿透、缓存击穿和分布式锁
 - 延迟提醒设置、到期扫描、后台 scanner 和 scanner 分布式锁
+- 任务点赞、取消点赞、点赞状态和 Redis Set 去重
+- 通知重试队列、FIFO 出队、后台 worker 和 worker 分布式锁
 - 创建任务限流
 - 登录限流
 
@@ -278,6 +285,27 @@ ZRANGEBYSCORE task:reminder -inf now
 
 到期后会创建 `task_reminder` 通知，写入负责人未读集合，并从 `task:reminder` 移除该任务。
 
+### 点赞任务
+
+```bash
+curl -s -X POST 'http://127.0.0.1:8000/tasks/1/like' \
+  -H "Authorization: Bearer ${TOKEN}"
+```
+
+### 查询点赞状态
+
+```bash
+curl -s -X GET 'http://127.0.0.1:8000/tasks/1/like-status' \
+  -H "Authorization: Bearer ${TOKEN}"
+```
+
+### 取消点赞
+
+```bash
+curl -s -X DELETE 'http://127.0.0.1:8000/tasks/1/like' \
+  -H "Authorization: Bearer ${TOKEN}"
+```
+
 ### 查询团队动态和热门任务
 
 ```bash
@@ -301,6 +329,37 @@ curl -s 'http://127.0.0.1:8000/teams/1/tasks/hot' \
 ```text
 同一 IP 一分钟内前 5 次登录请求继续进入原登录逻辑，第 6 次返回“登录过于频繁，请稍后再试”。
 ```
+
+## 通知重试队列验证
+
+通知重试使用 Redis List：
+
+```text
+key: notification:retry:queue
+入队: RPUSH notification:retry:queue payload
+出队: LPOP notification:retry:queue
+```
+
+后台 worker 每 5 秒尝试处理一条重试通知，并用分布式锁避免多实例重复处理：
+
+```redis
+SET lock:notification:retry:worker token NX EX 4
+```
+
+手工验证时可以写入一条 payload：
+
+```bash
+redis-cli -n 1 RPUSH notification:retry:queue '{
+  "receiverId": 2,
+  "actorId": 0,
+  "notificationType": "task_reminder",
+  "content": "notification retry worker test",
+  "relatedTaskId": 2,
+  "retryCount": 0
+}'
+```
+
+worker 消费后会创建 MySQL 通知，并将通知 ID 写入 `notification:unread:{receiverId}`。
 
 ## 延迟提醒验证
 

@@ -12,3 +12,10 @@ type SetReminderReq struct {
 }
 
 type SetReminderRes struct{}
+
+type CancelReminderReq struct {
+	g.Meta `path:"/tasks/{taskId}/reminder" method:"delete" tags:"Task" summary:"取消任务提醒"`
+	TaskId uint64 `json:"taskId" in:"path" v:"required|min:1#任务ID不能为空|任务ID不合法"`
+}
+
+type CancelReminderRes struct{}

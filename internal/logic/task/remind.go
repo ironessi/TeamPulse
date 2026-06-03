@@ -201,3 +201,37 @@ func scanDueRemindersWithLock(ctx context.Context, now int64) error {
 	// 4. 当前实例持有锁，执行本轮到期提醒扫描。
 	return ScanDueReminders(ctx, now)
 }
+
+// CancelReminder 取消任务提醒。
+func CancelReminder(ctx context.Context, userId uint64, taskId uint64) error {
+	// 1. 查询任务是否存在
+	var task entity.Task
+	err := dao.Task.Ctx(ctx).Where("id", taskId).Scan(&task)
+	// 2. 任务不存在时返回“任务不存在”
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("任务不存在")
+	}
+	if err != nil {
+		return err
+	}
+	if task.Id == 0 {
+		return errors.New("任务不存在")
+	}
+	// 3. 校验当前用户是否属于任务所在团队
+	count, err := dao.TeamMember.Ctx(ctx).Where("team_id", task.TeamId).Where("user_id", userId).Count()
+	if err != nil {
+		return err
+	}
+	// 4. 非团队成员返回“你没有权限取消该任务提醒”
+	if count == 0 {
+		return errors.New("你没有权限取消该任务提醒")
+	}
+
+	// 5. 从 Redis ZSet 中移除 taskId
+	err = removeTaskReminder(ctx, taskId)
+	if err != nil {
+		return err
+	}
+	// 6. 不管 ZREM 删除了 1 个还是 0 个，都返回 nil，保证幂等
+	return nil
+}

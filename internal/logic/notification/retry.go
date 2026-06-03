@@ -1,0 +1,147 @@
+package notification
+
+import (
+	"context"
+	"encoding/json"
+	lockLogic "redis-demo/internal/logic/lock"
+	"time"
+
+	"github.com/gogf/gf/v2/frame/g"
+)
+
+const (
+	notificationRetryQueueKey       = "notification:retry:queue"
+	notificationRetryMaxCount       = 3
+	notificationRetryWorkerInterval = 5 * time.Second
+	notificationRetryWorkerLockKey  = "lock:notification:retry:worker"
+	notificationRetryWorkerLockTTL  = 4 * time.Second
+)
+
+// RetryNotificationPayload 重试通知数据结构
+type RetryNotificationPayload struct {
+	// 1. 接收人 ID
+	ReceiverId uint64 `json:"receiverId"`
+	// 2. 触发人 ID
+	ActorId uint64 `json:"actorId"`
+	// 3. 通知类型
+	NotificationType string `json:"notificationType"`
+	// 4. 通知内容
+	Content string `json:"content"`
+	// 5. 关联任务 ID
+	RelatedTaskId uint64 `json:"relatedTaskId"`
+	// 6. 当前重试次数
+	RetryCount uint64 `json:"retryCount"`
+}
+
+// EnqueueNotificationRetry 将失败通知写入 Redis 重试队列。
+func EnqueueNotificationRetry(ctx context.Context, payload RetryNotificationPayload) error {
+	// 1. 将 payload 转成 JSON
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	// 2. RPUSH 到 notification:retry:queue
+	_, err = g.Redis().RPush(ctx, notificationRetryQueueKey, string(data))
+	// 3. 返回错误或 nil
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// DequeueNotificationRetry 从 Redis 重试队列取出一条通知。
+func DequeueNotificationRetry(ctx context.Context) (*RetryNotificationPayload, error) {
+	// 1. LPOP notification:retry:queue
+	value, err := g.Redis().LPop(ctx, notificationRetryQueueKey)
+	if err != nil {
+		return nil, err
+	}
+	// 2. 队列为空时返回 nil, nil
+	if value.IsNil() {
+		return nil, nil
+	}
+	// 3. JSON 反序列化成 RetryNotificationPayload
+	var payload RetryNotificationPayload
+	if err := json.Unmarshal([]byte(value.String()), &payload); err != nil {
+		return nil, err
+	}
+	// 4. 返回 payload
+	return &payload, nil
+}
+
+// ProcessOneNotificationRetry 处理一条通知重试任务。
+func ProcessOneNotificationRetry(ctx context.Context) (bool, error) {
+	// 1. 从 Redis 队列取出一条 payload
+	payload, err := DequeueNotificationRetry(ctx)
+	if err != nil {
+		return false, err
+	}
+	// 2. 队列为空时返回 false, nil
+	if payload == nil {
+		return false, nil
+	}
+	// 3. 调用 CreateNotification 重新创建通知
+	err = CreateNotification(ctx, payload.ReceiverId, payload.ActorId, payload.NotificationType, payload.Content, payload.RelatedTaskId)
+
+	// 4. 创建成功，返回 true, nil
+	if err == nil {
+		return true, nil
+	}
+	// 5. 创建失败时增加 RetryCount
+	payload.RetryCount++
+	// 6. RetryCount 未超过最大次数时重新入队
+	if payload.RetryCount <= notificationRetryMaxCount {
+		if enqueueErr := EnqueueNotificationRetry(ctx, *payload); enqueueErr != nil {
+			return true, enqueueErr
+		}
+	}
+	// 7. 返回 true, err
+	return true, err
+}
+
+// StartNotificationRetryWorker 启动通知重试后台 worker。
+func StartNotificationRetryWorker(ctx context.Context) {
+	// 1. 启动 goroutine
+	go func() {
+		// 2. 创建 ticker，每隔 notificationRetryWorkerInterval 触发一次
+		ticker := time.NewTicker(notificationRetryWorkerInterval)
+		// 3. defer ticker.Stop()
+		defer ticker.Stop()
+		// 4. for + select 监听 ctx.Done() 和 ticker.C
+		for {
+			select {
+			// 5. ctx.Done() 触发时退出 goroutine
+			case <-ctx.Done():
+				return
+
+			case <-ticker.C:
+				// 6. 调用 ProcessOneNotificationRetry
+				processed, err := processOneNotificationRetryWithLock(ctx)
+				if err != nil {
+					g.Log().Error(ctx, "notification retry worker error", "processed", processed, "err", err)
+				}
+			}
+		}
+	}()
+}
+
+// processOneNotificationRetryWithLock 带分布式锁处理一条通知重试任务。
+func processOneNotificationRetryWithLock(ctx context.Context) (bool, error) {
+	// 1. 尝试获取 worker 分布式锁
+	lock, locked, err := lockLogic.TryLock(ctx, notificationRetryWorkerLockKey, notificationRetryWorkerLockTTL)
+	if err != nil {
+		return false, err
+	}
+	// 2. 拿不到锁时返回 false, nil，表示本轮跳过
+	if !locked {
+		return false, nil
+	}
+
+	// 3. 拿到锁后 defer Unlock
+	defer func() {
+		if err := lockLogic.Unlock(ctx, lock); err != nil {
+			g.Log().Error(ctx, "unlock notification retry worker failed", "err", err)
+		}
+	}()
+	return ProcessOneNotificationRetry(ctx)
+}

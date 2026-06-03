@@ -1306,6 +1306,223 @@ func TestScanDueRemindersWithLockScansAndReleasesLock(t *testing.T) {
 	})
 }
 
+func TestCancelReminderRemovesReminder(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, _ := updateTaskTestFixture(t)
+	member := fmt.Sprintf("%d", task.Id)
+
+	if _, err := g.Redis().Do(ctx, "ZADD", taskReminderKey, time.Now().Unix()+3600, member); err != nil {
+		t.Fatalf("prepare reminder failed: %v", err)
+	}
+
+	if err := CancelReminder(ctx, memberId, task.Id); err != nil {
+		t.Fatalf("CancelReminder failed: %v", err)
+	}
+
+	if reminderMemberExists(t, member) {
+		t.Fatal("cancel reminder should remove task from task:reminder")
+	}
+
+	t.Cleanup(func() {
+		removeTaskReminderMemberForTest(t, member)
+	})
+}
+
+func TestCancelReminderIsIdempotent(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, _ := updateTaskTestFixture(t)
+	member := fmt.Sprintf("%d", task.Id)
+
+	removeTaskReminderMemberForTest(t, member)
+
+	if err := CancelReminder(ctx, memberId, task.Id); err != nil {
+		t.Fatalf("CancelReminder without existing reminder should still succeed: %v", err)
+	}
+
+	if reminderMemberExists(t, member) {
+		t.Fatal("task reminder should still not exist after idempotent cancel")
+	}
+}
+
+func TestCancelReminderRejectsNonMember(t *testing.T) {
+	ctx := gctx.New()
+	task, _, outsiderId := updateTaskTestFixture(t)
+	member := fmt.Sprintf("%d", task.Id)
+
+	if _, err := g.Redis().Do(ctx, "ZADD", taskReminderKey, time.Now().Unix()+3600, member); err != nil {
+		t.Fatalf("prepare reminder failed: %v", err)
+	}
+
+	err := CancelReminder(ctx, outsiderId, task.Id)
+	if err == nil {
+		t.Fatal("CancelReminder should reject non-member")
+	}
+	if !strings.Contains(err.Error(), "你没有权限取消该任务提醒") {
+		t.Fatalf("unexpected non-member error: %v", err)
+	}
+	if !reminderMemberExists(t, member) {
+		t.Fatal("non-member cancel should not remove reminder")
+	}
+
+	t.Cleanup(func() {
+		removeTaskReminderMemberForTest(t, member)
+	})
+}
+
+func TestCancelReminderRejectsMissingTask(t *testing.T) {
+	ctx := gctx.New()
+	_, memberId, _ := updateTaskTestFixture(t)
+	missingTaskId := uint64(time.Now().UnixNano())
+	member := fmt.Sprintf("%d", missingTaskId)
+
+	err := CancelReminder(ctx, memberId, missingTaskId)
+	if err == nil {
+		t.Fatal("CancelReminder should reject missing task")
+	}
+	if !strings.Contains(err.Error(), "任务不存在") {
+		t.Fatalf("unexpected missing task error: %v", err)
+	}
+
+	t.Cleanup(func() {
+		removeTaskReminderMemberForTest(t, member)
+	})
+}
+
+func TestLikeTaskAddsLikeAndIsIdempotent(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, _ := updateTaskTestFixture(t)
+	key := taskLikeKey(task.Id)
+
+	removeTaskLikeKeyForTest(t, task.Id)
+
+	count, err := LikeTask(ctx, memberId, task.Id)
+	if err != nil {
+		t.Fatalf("LikeTask failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("first like count should be 1, got %d", count)
+	}
+
+	count, err = LikeTask(ctx, memberId, task.Id)
+	if err != nil {
+		t.Fatalf("repeat LikeTask failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("repeat like should not increase count, got %d", count)
+	}
+
+	isMember, err := g.Redis().Do(ctx, "SISMEMBER", key, memberId)
+	if err != nil {
+		t.Fatalf("check like set failed: %v", err)
+	}
+	if isMember.Int() != 1 {
+		t.Fatal("liked user should exist in task like set")
+	}
+
+	t.Cleanup(func() {
+		removeTaskLikeKeyForTest(t, task.Id)
+	})
+}
+
+func TestUnlikeTaskRemovesLikeAndIsIdempotent(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, _ := updateTaskTestFixture(t)
+
+	removeTaskLikeKeyForTest(t, task.Id)
+	if _, err := LikeTask(ctx, memberId, task.Id); err != nil {
+		t.Fatalf("prepare like failed: %v", err)
+	}
+
+	count, err := UnlikeTask(ctx, memberId, task.Id)
+	if err != nil {
+		t.Fatalf("UnlikeTask failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("unlike should reduce count to 0, got %d", count)
+	}
+
+	count, err = UnlikeTask(ctx, memberId, task.Id)
+	if err != nil {
+		t.Fatalf("repeat UnlikeTask failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("repeat unlike should keep count 0, got %d", count)
+	}
+
+	t.Cleanup(func() {
+		removeTaskLikeKeyForTest(t, task.Id)
+	})
+}
+
+func TestGetLikeStatusReturnsCurrentUserStateAndCount(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, _ := updateTaskTestFixture(t)
+
+	removeTaskLikeKeyForTest(t, task.Id)
+
+	isLiked, count, err := GetLikeStatus(ctx, memberId, task.Id)
+	if err != nil {
+		t.Fatalf("GetLikeStatus before like failed: %v", err)
+	}
+	if isLiked || count != 0 {
+		t.Fatalf("unexpected status before like: isLiked=%v count=%d", isLiked, count)
+	}
+
+	if _, err := LikeTask(ctx, memberId, task.Id); err != nil {
+		t.Fatalf("prepare like failed: %v", err)
+	}
+
+	isLiked, count, err = GetLikeStatus(ctx, memberId, task.Id)
+	if err != nil {
+		t.Fatalf("GetLikeStatus after like failed: %v", err)
+	}
+	if !isLiked || count != 1 {
+		t.Fatalf("unexpected status after like: isLiked=%v count=%d", isLiked, count)
+	}
+
+	t.Cleanup(func() {
+		removeTaskLikeKeyForTest(t, task.Id)
+	})
+}
+
+func TestTaskLikeRejectsNonMemberAndMissingTask(t *testing.T) {
+	ctx := gctx.New()
+	task, _, outsiderId := updateTaskTestFixture(t)
+
+	_, err := LikeTask(ctx, outsiderId, task.Id)
+	if err == nil {
+		t.Fatal("LikeTask should reject non-member")
+	}
+	if !strings.Contains(err.Error(), "用户不属于任务团队") {
+		t.Fatalf("unexpected non-member like error: %v", err)
+	}
+
+	_, err = UnlikeTask(ctx, outsiderId, task.Id)
+	if err == nil {
+		t.Fatal("UnlikeTask should reject non-member")
+	}
+	if !strings.Contains(err.Error(), "用户不属于任务团队") {
+		t.Fatalf("unexpected non-member unlike error: %v", err)
+	}
+
+	_, _, err = GetLikeStatus(ctx, outsiderId, task.Id)
+	if err == nil {
+		t.Fatal("GetLikeStatus should reject non-member")
+	}
+	if !strings.Contains(err.Error(), "用户不属于任务团队") {
+		t.Fatalf("unexpected non-member status error: %v", err)
+	}
+
+	missingTaskId := uint64(time.Now().UnixNano())
+	_, err = LikeTask(ctx, outsiderId, missingTaskId)
+	if err == nil {
+		t.Fatal("LikeTask should reject missing task")
+	}
+	if !strings.Contains(err.Error(), "任务不存在") {
+		t.Fatalf("unexpected missing task error: %v", err)
+	}
+}
+
 func statusNotificationTestFixture(t *testing.T) (entity.Task, uint64, uint64) {
 	t.Helper()
 	ctx := gctx.New()
@@ -1432,5 +1649,14 @@ func removeTaskReminderMemberForTest(t *testing.T, member string) {
 
 	if _, err := g.Redis().Do(ctx, "ZREM", taskReminderKey, member); err != nil {
 		t.Errorf("remove task reminder member failed: %v", err)
+	}
+}
+
+func removeTaskLikeKeyForTest(t *testing.T, taskId uint64) {
+	t.Helper()
+	ctx := gctx.New()
+
+	if _, err := g.Redis().Del(ctx, taskLikeKey(taskId)); err != nil {
+		t.Errorf("remove task like key failed: %v", err)
 	}
 }
