@@ -1161,22 +1161,26 @@ go test ./... -count=1
 | 工单评论 | 创建评论、评论列表、团队动态、评论通知、提及通知均已完成后端验收 | `go test ./internal/logic/task -count=1` 与 HTTP 联调 |
 | 延迟提醒 | 设置提醒、取消提醒、扫描到期提醒、后台 scanner、scanner 分布式锁均已完成 | `go test ./... -count=1` 与服务级联调 |
 | 任务点赞 | 点赞、取消点赞、点赞状态查询已完成后端测试与 HTTP 联调 | `go test ./... -count=1` 与 HTTP 联调 |
-| 通知重试队列 | Redis List 入队、出队、FIFO 和空队列处理已完成 | `go test ./internal/logic/notification -count=1` |
+| 通知重试队列 | Redis List 入队、出队、FIFO、后台 worker、worker 分布式锁和失败路径入队均已完成 | `go test ./... -count=1` 与服务级联调 |
 
 ### 当前第一步：通知重试队列体验收口
 
-目标：通知重试队列基础工具已完成自动测试，下一步再决定是否接入真实通知失败路径或后台重试 worker。
+目标：通知重试队列、后台 worker、worker 分布式锁和 `CreateNotification` 失败路径入队均已完成，项目进入最终文档与演示收口。
 
 当前拆分：
 
 1. 已完成小切片一：`EnqueueNotificationRetry` 使用 `RPUSH` 入队。
 2. 已完成小切片二：`DequeueNotificationRetry` 使用 `LPOP` 出队。
 3. 已完成小切片三：空队列返回 `nil, nil`。
-4. 已完成自动测试，验证 FIFO、payload 完整性和空队列行为。
+4. 已完成小切片四：`ProcessOneNotificationRetry` 处理一条重试通知，失败时按 `RetryCount` 重新入队。
+5. 已完成小切片五：服务启动时启动通知重试 worker，每 5 秒处理一条重试通知。
+6. 已完成小切片六：worker 每轮使用 `lock:notification:retry:worker` 加锁，避免多实例重复处理。
+7. 已完成小切片七：`CreateNotification` 在 MySQL 插入失败时写入重试队列。
+8. 已完成自动测试和服务级联调，验证 FIFO、payload 完整性、空队列、worker 自动消费和未读集合写入。
 
 ### 下一步优先级
 
-优先建议先不急着扩大：下一步可以接一个最小后台重试 worker，或进入项目最终 README/演示收口。
+优先建议进入项目最终 README/演示收口；后续如继续扩展，可考虑前端点赞入口或通知重试死信队列。
 
 ## 18. 每日进展记录
 
