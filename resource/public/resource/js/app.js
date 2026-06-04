@@ -151,6 +151,13 @@ async function request(path, options = {}) {
     else if (path.includes("/online-members")) redisKey = "presence:team:{teamId}";
     else if (path.includes("/notifications/unread-count")) redisKey = "notification:unread:{userId}";
     else if (path.includes("/notifications") && path.includes("/read")) redisKey = "notification:unread:{userId} (SREM)";
+    else if (path.includes("/comments") && options.method === "POST") redisKey = "team:activities:{teamId} + notification:unread:{userId}";
+    else if (path.includes("/comments")) redisKey = "MySQL task_comment";
+    else if (path.includes("/like-status")) redisKey = "task:likes:{taskId} (SISMEMBER + SCARD)";
+    else if (path.includes("/like") && options.method === "POST") redisKey = "task:likes:{taskId} (SADD)";
+    else if (path.includes("/like") && options.method === "DELETE") redisKey = "task:likes:{taskId} (SREM)";
+    else if (path.includes("/reminder") && options.method === "POST") redisKey = "task:reminder (ZADD)";
+    else if (path.includes("/reminder") && options.method === "DELETE") redisKey = "task:reminder (ZREM)";
     else if (path.includes("/activities")) redisKey = "team:activities:{teamId} (LRANGE)";
 
     if (!response.ok || body.code) {
@@ -654,6 +661,10 @@ async function openTaskDetail(taskId) {
     // Open Drawer
     $("#taskDetailDrawer").classList.add("active");
 
+    // Load comments, like status
+    loadComments(taskId);
+    loadLikeStatus(taskId);
+
     // Automatically trigger update on hot ranking list
     refreshHotTasks(false);
   } catch (err) {
@@ -787,7 +798,10 @@ function renderNotifications() {
         
         let typeIcon = "fa-bell";
         if (n.type === "task_assigned") typeIcon = "fa-user-tag";
-        if (n.type === "task_status_changed") typeIcon = "fa-circle-notch";
+        if (n.type === "task_status_changed" || n.type === "task_status_updated") typeIcon = "fa-circle-notch";
+        if (n.type === "task_commented") typeIcon = "fa-comment";
+        if (n.type === "task_mentioned") typeIcon = "fa-at";
+        if (n.type === "task_reminder") typeIcon = "fa-clock";
 
         item.innerHTML = `
           ${n.isRead === 0 ? '<div class="notif-unread-dot"></div>' : '<div style="width: 8px;"></div>'}
@@ -954,6 +968,147 @@ function escapeHtml(unsafe) {
     .replace(/'/g, "&#039;");
 }
 
+// ─── Comments ───────────────────────────────────────────────────────────────────
+
+async function loadComments(taskId) {
+  const container = $("#commentList");
+  if (!container) return;
+  try {
+    const data = await request(`/tasks/${taskId}/comments`);
+    const list = data.list || [];
+    if (list.length === 0) {
+      container.innerHTML = '<p class="text-muted" style="font-size: 12px;">暂无评论</p>';
+      return;
+    }
+    container.innerHTML = "";
+    list.forEach(c => {
+      const item = document.createElement("div");
+      item.className = "comment-item";
+      item.style.cssText = "padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.06); font-size:13px;";
+      const time = c.createdAt ? new Date(c.createdAt * 1000).toLocaleString() : "";
+      item.innerHTML = `
+        <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+          <span style="color:var(--primary); font-weight:500;">用户 #${c.userId}</span>
+          <span style="font-size:11px; color:var(--text-muted);">${time}</span>
+        </div>
+        <div>${escapeHtml(c.content)}</div>
+      `;
+      container.appendChild(item);
+    });
+  } catch (err) {
+    container.innerHTML = '<p class="text-muted" style="font-size: 12px;">加载评论失败</p>';
+  }
+}
+
+async function createComment(e) {
+  e.preventDefault();
+  if (!state.selectedTask) return;
+  const content = $("#commentContent").value.trim();
+  if (!content) return;
+
+  const mentionStr = $("#mentionUserIds").value.trim();
+  let mentionUserIds = [];
+  if (mentionStr) {
+    mentionUserIds = mentionStr.split(",").map(s => Number(s.trim())).filter(n => n > 0);
+  }
+
+  try {
+    await request(`/tasks/${state.selectedTask.taskId}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ content, mentionUserIds })
+    });
+    showToast("评论发送成功", "success");
+    $("#commentContent").value = "";
+    $("#mentionUserIds").value = "";
+    loadComments(state.selectedTask.taskId);
+    refreshActivities(false);
+    refreshNotifications(false);
+  } catch (err) {
+    showToast(err.message || "评论失败", "error");
+  }
+}
+
+// ─── Likes ─────────────────────────────────────────────────────────────────────
+
+async function loadLikeStatus(taskId) {
+  try {
+    const data = await request(`/tasks/${taskId}/like-status`);
+    const btn = $("#likeToggleBtn");
+    const text = $("#likeBtnText");
+    const badge = $("#likeCountBadge");
+    if (!btn) return;
+
+    if (data.isLiked) {
+      btn.classList.add("liked");
+      btn.style.color = "#ef4444";
+      text.textContent = "已点赞";
+    } else {
+      btn.classList.remove("liked");
+      btn.style.color = "";
+      text.textContent = "点赞";
+    }
+    if (badge) badge.textContent = data.likeCount || 0;
+  } catch (err) {
+    console.error("Load like status error:", err);
+  }
+}
+
+async function toggleLike() {
+  if (!state.selectedTask) return;
+  const isLiked = $("#likeToggleBtn")?.classList.contains("liked");
+  try {
+    if (isLiked) {
+      await request(`/tasks/${state.selectedTask.taskId}/like`, { method: "DELETE" });
+      showToast("已取消点赞", "info");
+    } else {
+      await request(`/tasks/${state.selectedTask.taskId}/like`, { method: "POST" });
+      showToast("点赞成功", "success");
+    }
+    loadLikeStatus(state.selectedTask.taskId);
+    refreshHotTasks(false);
+  } catch (err) {
+    showToast(err.message || "操作失败", "error");
+  }
+}
+
+// ─── Reminders ─────────────────────────────────────────────────────────────────
+
+async function setReminder() {
+  if (!state.selectedTask) return;
+  const input = $("#reminderInput");
+  if (!input || !input.value) {
+    showToast("请选择提醒时间", "error");
+    return;
+  }
+  const remindAt = Math.floor(new Date(input.value).getTime() / 1000);
+  if (remindAt <= Math.floor(Date.now() / 1000)) {
+    showToast("提醒时间必须晚于当前时间", "error");
+    return;
+  }
+  try {
+    await request(`/tasks/${state.selectedTask.taskId}/reminder`, {
+      method: "POST",
+      body: JSON.stringify({ remindAt })
+    });
+    showToast("提醒设置成功", "success");
+    input.value = "";
+    $("#cancelReminderBtn").style.display = "";
+  } catch (err) {
+    showToast(err.message || "设置提醒失败", "error");
+  }
+}
+
+async function cancelReminder() {
+  if (!state.selectedTask) return;
+  try {
+    await request(`/tasks/${state.selectedTask.taskId}/reminder`, { method: "DELETE" });
+    showToast("提醒已取消", "info");
+    $("#cancelReminderBtn").style.display = "none";
+  } catch (err) {
+    showToast(err.message || "取消提醒失败", "error");
+  }
+}
+
 // Event Bindings setup on window load
 function initEvents() {
   // Login & Register Tab Navigation
@@ -1096,6 +1251,19 @@ function initEvents() {
 
   const editTaskForm = $("#taskEditForm");
   if (editTaskForm) editTaskForm.addEventListener("submit", updateTask);
+
+  // Like, Reminder, Comment bindings
+  const likeBtn = $("#likeToggleBtn");
+  if (likeBtn) likeBtn.addEventListener("click", toggleLike);
+
+  const setRemBtn = $("#setReminderBtn");
+  if (setRemBtn) setRemBtn.addEventListener("click", setReminder);
+
+  const cancelRemBtn = $("#cancelReminderBtn");
+  if (cancelRemBtn) cancelRemBtn.addEventListener("click", cancelReminder);
+
+  const commentForm = $("#commentForm");
+  if (commentForm) commentForm.addEventListener("submit", createComment);
 
   // Drawer actions for status shift buttons
   $$(".task-status-action").forEach(btn => {

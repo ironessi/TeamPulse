@@ -166,6 +166,40 @@
             </button>
           </div>
         </div>
+
+        <!-- Like & Reminder Actions -->
+        <div class="drawer-actions" style="margin-top: 16px; display: flex; gap: 12px; flex-wrap: wrap;">
+          <button id="likeToggleBtn" class="btn btn-secondary" type="button">
+            <i class="fa-regular fa-heart"></i> <span id="likeBtnText">点赞</span>
+            <span id="likeCountBadge" class="nav-badge" style="display:inline-block; margin-left:6px;">0</span>
+          </button>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <input id="reminderInput" type="datetime-local" class="form-input" style="padding:6px 10px; font-size:13px; border-radius:6px; border:1px solid rgba(255,255,255,0.1); background:rgba(255,255,255,0.05); color:inherit;">
+            <button id="setReminderBtn" class="btn btn-secondary btn-small" type="button" title="设置提醒">
+              <i class="fa-solid fa-clock"></i> 提醒
+            </button>
+            <button id="cancelReminderBtn" class="btn btn-secondary btn-small" type="button" title="取消提醒" style="display:none;">
+              <i class="fa-solid fa-bell-slash"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Comments Section -->
+        <div class="drawer-actions" style="margin-top: 20px;">
+          <h4 class="drawer-section-title"><i class="fa-solid fa-comments"></i> 评论</h4>
+          <form id="commentForm" style="margin-bottom: 12px;">
+            <div class="form-group" style="margin-bottom: 8px;">
+              <textarea id="commentContent" rows="2" placeholder="输入评论内容..." required style="width:100%; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.1); background:rgba(255,255,255,0.05); color:inherit; font-size:13px; resize:vertical;"></textarea>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <input id="mentionUserIds" placeholder="@用户ID（逗号分隔）" style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid rgba(255,255,255,0.1); background:rgba(255,255,255,0.05); color:inherit; font-size:13px;">
+              <button class="btn btn-primary btn-small" type="submit"><i class="fa-solid fa-paper-plane"></i> 发送</button>
+            </div>
+          </form>
+          <div id="commentList" class="comment-list-container" style="max-height: 240px; overflow-y: auto;">
+            <p class="text-muted" style="font-size: 12px;">暂无评论</p>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -265,9 +299,9 @@
         <ul class="redis-legend-list">
           <li><span class="legend-dot str"></span> <b>String</b> <small>验证码、黑名单、心跳</small></li>
           <li><span class="legend-dot cache"></span> <b>Cache</b> <small>用户资料 (Cache Aside)</small></li>
-          <li><span class="legend-dot set"></span> <b>Set</b> <small>在线列表、团队成员、通知</small></li>
-          <li><span class="legend-dot list"></span> <b>List</b> <small>团队操作动态流</small></li>
-          <li><span class="legend-dot zset"></span> <b>ZSet</b> <small>热门任务排行计数</small></li>
+          <li><span class="legend-dot set"></span> <b>Set</b> <small>在线列表、团队成员、通知、点赞</small></li>
+          <li><span class="legend-dot list"></span> <b>List</b> <small>团队动态流、通知重试队列</small></li>
+          <li><span class="legend-dot zset"></span> <b>ZSet</b> <small>热门排行、延迟提醒队列</small></li>
         </ul>
       </section>
     </aside>
@@ -409,7 +443,7 @@
           <div class="section-header">
             <div>
               <h2>通知中心</h2>
-              <p class="section-desc">任务指派与状态变更的消息中心，由 Redis Set 维护已读状态</p>
+              <p class="section-desc">任务指派、状态变更、评论提及和到期提醒的消息中心，由 Redis Set 维护已读状态</p>
             </div>
             <div class="header-actions">
               <button id="loadNotificationsBtn" class="btn btn-secondary" type="button">

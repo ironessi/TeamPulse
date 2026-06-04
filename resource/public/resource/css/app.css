@@ -1716,3 +1716,25 @@ input:focus, textarea:focus, select:focus {
     grid-template-columns: 1fr;
   }
 }
+
+/* Like Button Liked State */
+#likeToggleBtn.liked {
+  color: #ef4444 !important;
+  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+#likeToggleBtn.liked i {
+  font-weight: 900;
+}
+
+/* Comment List Items */
+.comment-item:last-child {
+  border-bottom: none !important;
+}
+
+/* Form input datetime-local */
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.7);
+  cursor: pointer;
+}
