@@ -79,6 +79,30 @@ http://127.0.0.1:8000/
 | 创建任务限流 | `rate:task:create:{userId}:{minute}` | String Counter | 每用户每分钟最多 10 次 |
 | 登录限流 | `rate:login:{ip}:{minute}` | String Counter | 每 IP 每分钟最多 5 次 |
 
+## 项目亮点
+
+这个项目覆盖了 Redis 在协作系统中常见的几类用法：
+
+| Redis 能力 | 项目场景 | 关键点 |
+| --- | --- | --- |
+| String + TTL | 登录验证码、JWT 黑名单、在线心跳 | 用过期时间表达临时状态 |
+| Cache Aside | 用户资料、任务详情 | MySQL 做真实数据源，Redis 做可重建缓存 |
+| 空值缓存 | 不存在任务详情 | 防止缓存穿透反复打 MySQL |
+| TTL 随机抖动 | 任务详情缓存 | 降低大量 key 同时过期造成的雪崩风险 |
+| Set | 团队成员、通知未读集合、任务点赞 | 去重、成员关系和快速计数 |
+| List | 团队动态流、通知重试队列 | 保存最近事件和 FIFO 重试任务 |
+| Sorted Set | 热门任务排行、任务延迟提醒 | 按分数排序和按时间戳扫描 |
+| Counter + TTL | 创建任务限流、登录限流 | 固定窗口限流 |
+| 分布式锁 | 缓存击穿、提醒 scanner、重试 worker | 多请求或多实例下互斥处理 |
+| 后台 goroutine | 到期提醒扫描、通知重试 worker | 服务启动后定时处理 Redis 队列或 ZSet |
+
+可以重点讲的工程取舍：
+
+- MySQL 保存真实业务数据，Redis 只保存可重建、需要 TTL 或高频访问的数据。
+- 通知创建先写 MySQL，再写 Redis 未读集合；如果 MySQL 插入失败，会将 payload 写入通知重试队列。
+- 延迟提醒先写入 ZSet，后台 scanner 到期后创建通知，通知创建成功后再移除 reminder，避免提醒丢失。
+- 热点任务详情缓存未命中时使用分布式锁互斥回源，避免大量请求同时查 MySQL。
+
 ## 技术栈
 
 - GoFrame v2
@@ -314,6 +338,32 @@ curl -s 'http://127.0.0.1:8000/teams/1/activities' \
 
 curl -s 'http://127.0.0.1:8000/teams/1/tasks/hot' \
   -H "Authorization: Bearer ${TOKEN}"
+```
+
+## 推荐演示顺序
+
+本地演示时可以按下面顺序串起完整 Redis 能力：
+
+1. 登录验证码：调用 `/auth/captcha`，观察 `auth:captcha:{username}`。
+2. 用户登录：调用 `/auth/login`，拿到 JWT。
+3. 创建团队并添加成员：观察 `team:members:{teamId}`。
+4. 上报在线心跳：观察 `presence:user:{userId}` 和 `presence:team:{teamId}`。
+5. 创建任务、更新状态、查看详情：观察 `team:activities:{teamId}` 和 `team:task:hot:{teamId}`。
+6. 查询任务详情两次：第一次回源写入 `task:detail:{taskId}`，第二次命中缓存。
+7. 评论并提及成员：观察 MySQL 通知表、`notification:unread:{userId}` 和团队动态流。
+8. 点赞和重复点赞：观察 `task:likes:{taskId}` 只保存一份 userId。
+9. 设置任务提醒：观察 `task:reminder` 中的 score 和 member。
+10. 手工写入通知重试 payload：观察 `notification:retry:queue` 被 worker 消费并生成通知。
+
+常用 Redis 检查命令：
+
+```bash
+redis-cli -n 1 KEYS 'task:*'
+redis-cli -n 1 KEYS 'notification:*'
+redis-cli -n 1 LRANGE team:activities:1 0 5
+redis-cli -n 1 ZRANGE team:task:hot:1 0 -1 WITHSCORES
+redis-cli -n 1 SMEMBERS task:likes:1
+redis-cli -n 1 ZRANGE task:reminder 0 -1 WITHSCORES
 ```
 
 ## 限流验证

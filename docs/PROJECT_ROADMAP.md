@@ -1347,3 +1347,11 @@ go test ./... -count=1
 2. 整理一组完整演示 curl：登录、团队、任务、评论、通知、提醒、点赞、重试队列。
 3. 可选补前端点赞入口；如果做前端，只接 `like-status`、`POST /like`、`DELETE /like` 三个已验收接口。
 4. 最后做一次全量测试和服务级 smoke test，准备项目封版提交。
+
+### 2026-06-04：今天完成了什么
+
+- 整理 README 项目亮点，将 Redis String、Cache Aside、空值缓存、TTL 抖动、Set、List、Sorted Set、Counter、分布式锁和后台 goroutine 映射到具体业务场景。
+- 补充工程取舍说明：MySQL 作为真实数据源，Redis 负责可重建缓存、临时状态、高频计数、队列和排行。
+- 补充推荐演示顺序，从验证码、登录、团队、在线心跳、任务、评论通知、点赞、延迟提醒到通知重试队列，形成完整展示链路。
+- 补充常用 Redis 检查命令，便于演示时观察 `task:*`、`notification:*`、动态流、热门排行、点赞集合和提醒队列。
+- 验证通过：`go test ./... -count=1`。
