@@ -243,13 +243,13 @@ echo ""
 echo "▶ [12/14] 延迟提醒"
 
 REMIND_AT=$(($(date +%s) + 3600))
-REMINDER=$(curl -s -X POST "$BASE/tasks/$TASK1_ID/reminder" \
+REMINDER=$(curl -s -X POST "$BASE/tasks/$TASK2_ID/reminder" \
   -H "$AUTH1" \
   -H 'Content-Type: application/json' \
   -d "{\"remindAt\":$REMIND_AT}")
 check "设置提醒" '"code":0' "$REMINDER"
 
-CANCEL_REM=$(curl -s -X DELETE "$BASE/tasks/$TASK1_ID/reminder" -H "$AUTH1")
+CANCEL_REM=$(curl -s -X DELETE "$BASE/tasks/$TASK2_ID/reminder" -H "$AUTH1")
 check "取消提醒" '"code":0' "$CANCEL_REM"
 
 # ─── 13. 通知 ───────────────────────────────────────────────────────────────────
