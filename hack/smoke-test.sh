@@ -10,6 +10,9 @@ BASE="${1:-http://127.0.0.1:8000}"
 PASS=0
 FAIL=0
 TOTAL=0
+TS=$(date +%s)
+USER_A="smoke_a${TS}"
+USER_B="smoke_b${TS}"
 
 # ─── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -44,17 +47,17 @@ echo "▶ [1/14] 注册用户"
 
 REG1=$(curl -s -X POST "$BASE/auth/register" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"smoketest1","password":"123456","nickname":"烟雾测试员1"}')
+  -d "{\"username\":\"$USER_A\",\"password\":\"123456\",\"nickname\":\"烟雾A\"}")
 check "注册用户1" '"userId"' "$REG1"
 USER1_ID=$(json_field "$REG1" "['data']['userId']")
-echo "     用户1 ID: $USER1_ID"
+echo "     用户1 ID: $USER1_ID ($USER_A)"
 
 REG2=$(curl -s -X POST "$BASE/auth/register" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"smoketest2","password":"123456","nickname":"烟雾测试员2"}')
+  -d "{\"username\":\"$USER_B\",\"password\":\"123456\",\"nickname\":\"烟雾B\"}")
 check "注册用户2" '"userId"' "$REG2"
 USER2_ID=$(json_field "$REG2" "['data']['userId']")
-echo "     用户2 ID: $USER2_ID"
+echo "     用户2 ID: $USER2_ID ($USER_B)"
 
 # ─── 2. 获取验证码 ──────────────────────────────────────────────────────────────
 
@@ -63,7 +66,7 @@ echo "▶ [2/14] 获取验证码"
 
 CAP1=$(curl -s -X POST "$BASE/auth/captcha" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"smoketest1"}')
+  -d "{\"username\":\"$USER_A\"}")
 check "获取验证码" '"code"' "$CAP1"
 CODE1=$(json_field "$CAP1" "['data']['code']")
 echo "     验证码: $CODE1"
@@ -75,7 +78,7 @@ echo "▶ [3/14] 登录"
 
 LOGIN1=$(curl -s -X POST "$BASE/auth/login" \
   -H 'Content-Type: application/json' \
-  -d "{\"username\":\"smoketest1\",\"password\":\"123456\",\"captcha\":\"$CODE1\"}")
+  -d "{\"username\":\"$USER_A\",\"password\":\"123456\",\"captcha\":\"$CODE1\"}")
 check "用户1登录" '"token"' "$LOGIN1"
 TOKEN1=$(json_field "$LOGIN1" "['data']['token']")
 echo "     Token1: ${TOKEN1:0:20}..."
@@ -83,17 +86,24 @@ echo "     Token1: ${TOKEN1:0:20}..."
 # 用户2登录
 CAP2=$(curl -s -X POST "$BASE/auth/captcha" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"smoketest2"}')
+  -d "{\"username\":\"$USER_B\"}")
 CODE2=$(json_field "$CAP2" "['data']['code']")
 
 LOGIN2=$(curl -s -X POST "$BASE/auth/login" \
   -H 'Content-Type: application/json' \
-  -d "{\"username\":\"smoketest2\",\"password\":\"123456\",\"captcha\":\"$CODE2\"}")
+  -d "{\"username\":\"$USER_B\",\"password\":\"123456\",\"captcha\":\"$CODE2\"}")
 check "用户2登录" '"token"' "$LOGIN2"
 TOKEN2=$(json_field "$LOGIN2" "['data']['token']")
 
 AUTH1="Authorization: Bearer $TOKEN1"
 AUTH2="Authorization: Bearer $TOKEN2"
+
+# 防止关键变量为空导致级联失败
+if [ -z "$USER1_ID" ] || [ -z "$USER2_ID" ] || [ -z "$TOKEN1" ] || [ -z "$TOKEN2" ]; then
+  echo ""
+  echo "  ⛔ 注册或登录失败，无法继续。请检查服务状态。"
+  exit 1
+fi
 
 # ─── 4. 用户资料 ────────────────────────────────────────────────────────────────
 
