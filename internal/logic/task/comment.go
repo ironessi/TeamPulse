@@ -15,8 +15,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gogf/gf/v2/database/gdb"
 	"github.com/gogf/gf/v2/errors/gerror"
 )
+
+type pendingUnreadNotification struct {
+	ReceiverId     uint64
+	NotificationId uint64
+}
 
 // CreateComment 创建任务评论。
 func CreateComment(ctx context.Context, userId uint64, taskId uint64, content string, mentionUserIds []uint64) (uint64, error) {
@@ -68,22 +74,72 @@ func CreateComment(ctx context.Context, userId uint64, taskId uint64, content st
 		}
 	}
 
-	// 8. 写入 MySQL task_comment
-	result, err := dao.TaskComment.Ctx(ctx).Data(do.TaskComment{
-		TaskId:  taskId,
-		TeamId:  task.TeamId,
-		UserId:  userId,
-		Content: content,
-	}).Insert()
+	var commentId uint64
+	pendingUnreadNotifications := make([]pendingUnreadNotification, 0) //创建一个切片 pendingUnreadNotifications，用于存储待处理的未读通知。
+	notifiedUserIds := make(map[uint64]struct{})                       // 记录本次评论已经通知过的用户 ID，避免负责人被 mention 后再收到重复通知。
+	err = dao.TaskComment.Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		// 8. 写入 MySQL task_comment
+		result, err := tx.Model(dao.TaskComment.Table()).Ctx(ctx).Data(do.TaskComment{
+			TaskId:  taskId,
+			TeamId:  task.TeamId,
+			UserId:  userId,
+			Content: content,
+		}).Insert()
+		if err != nil {
+			return err
+		}
+
+		insertId, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		commentId = uint64(insertId)
+
+		// 处理被提及成员的 task_mentioned 通知。
+		for _, mentionUserId := range mentionUserIds {
+			if mentionUserId == userId {
+				continue
+			}
+			notificationId, err := notificationLogic.CreateNotificationRecord(ctx, tx, mentionUserId, userId, notificationLogic.TypeTaskMentioned, fmt.Sprintf("用户%d在任务%s的评论中提到了你", userId, task.Title), taskId)
+			if err != nil {
+				return err
+			}
+			if notificationId > 0 {
+				pendingUnreadNotifications = append(pendingUnreadNotifications, pendingUnreadNotification{
+					ReceiverId:     mentionUserId,
+					NotificationId: notificationId,
+				})
+				notifiedUserIds[mentionUserId] = struct{}{}
+			}
+		}
+
+		// 负责人通知也只写 MySQL notification 记录。
+		if task.AssigneeId > 0 && task.AssigneeId != userId {
+			// 如果负责人已经因为 mention 收到通知，不重复创建 task_commented。
+			if _, alreadyNotified := notifiedUserIds[task.AssigneeId]; !alreadyNotified {
+				// 1. CreateNotificationRecord(ctx, tx, ...)
+				notificationId, err := notificationLogic.CreateNotificationRecord(ctx, tx, task.AssigneeId, userId, notificationLogic.TypeTaskCommented, fmt.Sprintf("用户%d评论了你负责的任务%s", userId, task.Title),
+					task.Id)
+				if err != nil {
+					return err
+				}
+				// 2. notificationId > 0 时追加到 pendingUnreadNotifications
+				if notificationId > 0 {
+					pendingUnreadNotifications = append(pendingUnreadNotifications, pendingUnreadNotification{
+						ReceiverId:     task.AssigneeId,
+						NotificationId: notificationId,
+					})
+				}
+			}
+		}
+
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
 
-	// 9. 获取新评论 ID
-	commentId, err := result.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
 	// 10. 写入团队动态流 team:activities:{teamId}
 	if err := team.AddActivity(ctx, task.TeamId, teamV1.ActivityItem{
 		Action:    "task_commented",
@@ -94,36 +150,9 @@ func CreateComment(ctx context.Context, userId uint64, taskId uint64, content st
 		return 0, err
 	}
 
-	// 11. 评论成功后创建通知
-	// 11.1 先记录已经通知过的人，避免同一次评论重复通知同一个接收人
-	notifiedUserIds := make(map[uint64]struct{}) //notifiedUserIds 是一个 map，用来记录已经通知过的用户 ID，避免同一次评论重复通知同一个接收人。key 是用户 ID，value 是空 struct{}，因为我们只关心 key 是否存在，不需要存储具体的值。每当我们给一个用户发送通知后，就在这个 map 中记录该用户 ID，这样在后续发送通知时就可以检查这个 map 来判断是否已经通知过该用户，从而避免重复通知。
-	// 11.2 先处理 mentionUserIds
-	// 先给被提及的人发 task_mentioned。
-	// 如果用户提及自己，不通知自己。
-	for _, mentionUserId := range mentionUserIds {
-		// 自己提及自己，不通知
-		if mentionUserId == userId {
-			continue
-		}
-		// 创建 task_mentioned 通知
-		if err := notificationLogic.CreateNotification(ctx, mentionUserId, userId, notificationLogic.TypeTaskMentioned, fmt.Sprintf("用户%d在任务%s的评论中提到了你", userId, task.Title), task.Id); err != nil {
+	for _, item := range pendingUnreadNotifications {
+		if err := notificationLogic.AddUnreadNotificationToRedis(ctx, item.ReceiverId, item.NotificationId); err != nil {
 			return 0, err
-		}
-
-		// 标记该用户已经通知过
-		notifiedUserIds[mentionUserId] = struct{}{}
-	}
-
-	// 11.3 再处理任务负责人
-	// 再给任务负责人发 task_commented。
-	// 如果负责人就是评论人，不通知自己。
-	// 如果负责人已经因为 mention 收到通知，不重复发送 task_commented。
-	if task.AssigneeId > 0 && task.AssigneeId != userId { //如果任务有负责人，并且负责人不是评论人自己，那么才考虑发送通知。
-		if _, alreadyNotified := notifiedUserIds[task.AssigneeId]; !alreadyNotified { //如果负责人没有因为 mention 收到通知，那么才发送 task_commented 通知。
-			// 创建 task_commented 通知
-			if err := notificationLogic.CreateNotification(ctx, task.AssigneeId, userId, notificationLogic.TypeTaskCommented, fmt.Sprintf("用户%d评论了你负责的任务%s", userId, task.Title), task.Id); err != nil {
-				return 0, err
-			}
 		}
 	}
 

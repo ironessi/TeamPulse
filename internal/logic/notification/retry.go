@@ -11,6 +11,7 @@ import (
 
 const (
 	notificationRetryQueueKey       = "notification:retry:queue"
+	notificationRetryProcessingKey  = "notification:retry:processing"
 	notificationRetryMaxCount       = 3
 	notificationRetryWorkerInterval = 5 * time.Second
 	notificationRetryWorkerLockKey  = "lock:notification:retry:worker"
@@ -33,6 +34,11 @@ type RetryNotificationPayload struct {
 	RetryCount uint64 `json:"retryCount"`
 }
 
+type notificationRetryMessage struct {
+	Payload RetryNotificationPayload
+	Raw     string
+}
+
 // EnqueueNotificationRetry 将失败通知写入 Redis 重试队列。
 func EnqueueNotificationRetry(ctx context.Context, payload RetryNotificationPayload) error {
 	// 1. 将 payload 转成 JSON
@@ -50,52 +56,104 @@ func EnqueueNotificationRetry(ctx context.Context, payload RetryNotificationPayl
 }
 
 // DequeueNotificationRetry 从 Redis 重试队列取出一条通知。
+// 使用 LMOVE 将消息从待处理队列移动到 processing 队列
+// 避免 worker 取到消息后宕机导致消息直接丢失。
 func DequeueNotificationRetry(ctx context.Context) (*RetryNotificationPayload, error) {
-	// 1. LPOP notification:retry:queue
-	value, err := g.Redis().LPop(ctx, notificationRetryQueueKey)
+	message, err := dequeueNotificationRetryMessage(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// 2. 队列为空时返回 nil, nil
+	if message == nil {
+		return nil, nil
+	}
+	return &message.Payload, nil
+}
+
+func dequeueNotificationRetryMessage(ctx context.Context) (*notificationRetryMessage, error) {
+	// 1. LMOVE queue -> processing
+	value, err := g.Redis().Do(
+		ctx,
+		"LMOVE",
+		notificationRetryQueueKey,
+		notificationRetryProcessingKey,
+		"LEFT",
+		"RIGHT",
+	)
+	if err != nil {
+		return nil, err
+	}
+	// 2. 空队列返回 nil, nil
 	if value.IsNil() {
 		return nil, nil
 	}
-	// 3. JSON 反序列化成 RetryNotificationPayload
+	// 3. 保存 raw 字符串
+	raw := value.String()
+	// 4. 反序列化成 payload
 	var payload RetryNotificationPayload
 	if err := json.Unmarshal([]byte(value.String()), &payload); err != nil {
 		return nil, err
 	}
-	// 4. 返回 payload
-	return &payload, nil
+	// 5. 返回 message
+	return &notificationRetryMessage{
+		Payload: payload,
+		Raw:     raw,
+	}, nil
+}
+
+func ackNotificationRetryMessage(ctx context.Context, raw string) error {
+	// 1. raw 为空直接返回
+	if raw == "" {
+		return nil
+	}
+	// 2. LREM processing 1 raw
+	_, err := g.Redis().LRem(ctx, notificationRetryProcessingKey, 1, raw)
+	// 3. 返回 error
+	return err
 }
 
 // ProcessOneNotificationRetry 处理一条通知重试任务。
 func ProcessOneNotificationRetry(ctx context.Context) (bool, error) {
 	// 1. 从 Redis 队列取出一条 payload
-	payload, err := DequeueNotificationRetry(ctx)
+	message, err := dequeueNotificationRetryMessage(ctx)
 	if err != nil {
 		return false, err
 	}
 	// 2. 队列为空时返回 false, nil
-	if payload == nil {
+	if message == nil {
 		return false, nil
 	}
-	// 3. 调用 CreateNotification 重新创建通知
-	err = CreateNotification(ctx, payload.ReceiverId, payload.ActorId, payload.NotificationType, payload.Content, payload.RelatedTaskId)
+	payload := message.Payload
+	// 3. 重试 worker 直接创建 MySQL 通知记录，避免调用 CreateNotification 时失败路径重复入队。
+	notificationId, err := CreateNotificationRecord(ctx, nil, payload.ReceiverId, payload.ActorId, payload.NotificationType, payload.Content, payload.RelatedTaskId)
 
 	// 4. 创建成功，返回 true, nil
 	if err == nil {
+		if ackErr := ackNotificationRetryMessage(ctx, message.Raw); ackErr != nil {
+			return false, ackErr
+		}
+		if redisErr := AddUnreadNotificationToRedis(ctx, payload.ReceiverId, notificationId); redisErr != nil {
+			return true, redisErr
+		}
 		return true, nil
 	}
-	// 5. 创建失败时增加 RetryCount
+
+	// 5. 创建失败时，先从 processing 删除旧消息。
+	// 后续如果还需要重试，会把 retryCount+1 的新 payload 重新放回 queue。
+	if ackErr := ackNotificationRetryMessage(ctx, message.Raw); ackErr != nil {
+		return true, ackErr
+	}
+
+	// 6. 创建失败时增加 RetryCount
 	payload.RetryCount++
-	// 6. RetryCount 未超过最大次数时重新入队
+
+	// 7. RetryCount 未超过最大次数时重新入队
 	if payload.RetryCount <= notificationRetryMaxCount {
-		if enqueueErr := EnqueueNotificationRetry(ctx, *payload); enqueueErr != nil {
+		if enqueueErr := EnqueueNotificationRetry(ctx, payload); enqueueErr != nil {
 			return true, enqueueErr
 		}
 	}
-	// 7. 返回 true, err
+
+	// 8. 返回 true, err
 	return true, err
 }
 

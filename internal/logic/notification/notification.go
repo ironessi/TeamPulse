@@ -8,6 +8,7 @@ import (
 	"redis-demo/internal/model/do"
 	"redis-demo/internal/model/entity"
 
+	"github.com/gogf/gf/v2/database/gdb"
 	"github.com/gogf/gf/v2/errors/gerror"
 	"github.com/gogf/gf/v2/frame/g"
 	"github.com/gogf/gf/v2/os/gtime"
@@ -149,30 +150,120 @@ func MarkAsRead(ctx context.Context, userId uint64, notificationId uint64) error
 
 // CreateNotification 创建一条业务通知，并加入接收人的未读集合。
 // 该函数供任务等业务 Logic 调用，不对前端直接开放。
-func CreateNotification(
+// func CreateNotification(
+// 	ctx context.Context,
+// 	receiverId uint64,
+// 	actorId uint64,
+// 	notificationType string,
+// 	content string,
+// 	relatedTaskId uint64,
+// ) error {
+// 	// 1. 如果接收人与触发人相同，直接返回，避免自己通知自己
+// 	if receiverId == actorId {
+// 		return nil
+// 	}
+// 	// 2. 向 MySQL 写入未读通知记录
+// 	result, err := dao.Notification.Ctx(ctx).Data(do.Notification{
+// 		ReceiverId:    receiverId,
+// 		ActorId:       actorId,
+// 		Type:          notificationType,
+// 		Content:       content,
+// 		RelatedTaskId: relatedTaskId,
+// 		IsRead:        0, //默认未读
+// 	}).Insert()
+// 	if err != nil { // MySQL 写入失败时，将通知内容放入重试队列，等待后台 worker 后续重试创建。
+// 		// 1. 组装 RetryNotificationPayload
+// 		// 2. 调用 EnqueueNotificationRetry
+// 		enqueueErr := EnqueueNotificationRetry(ctx, RetryNotificationPayload{
+// 			ReceiverId:       receiverId,
+// 			ActorId:          actorId,
+// 			NotificationType: notificationType,
+// 			Content:          content,
+// 			RelatedTaskId:    relatedTaskId,
+// 			RetryCount:       0,
+// 		})
+
+// 		// 3. 如果入队也失败，返回原始 err 或入队 err？
+// 		if enqueueErr != nil {
+// 			return enqueueErr
+// 		}
+
+// 		// 4. 返回 err
+// 		return err
+// 	}
+
+// 	// 3. 获取新增通知 ID
+// 	notificationId, err := result.LastInsertId()
+// 	if err != nil {
+// 		return err
+// 	}
+// 	// 4. 将通知 ID 加入 Redis 未读 Set
+// 	_, err = g.Redis().SAdd(ctx, notificationUnreadKey(receiverId), notificationId) //SAdd() 将一个或多个元素添加到集合中。
+// 	if err != nil {
+// 		return err
+// 	}
+// 	// 5. 返回 nil
+// 	return nil
+// }
+
+// CreateNotificationRecord 只创建 MySQL 通知记录。
+// 注意：这个函数不写 Redis，适合后续放进 MySQL 事务里。
+func CreateNotificationRecord(
 	ctx context.Context,
+	tx gdb.TX,
 	receiverId uint64,
 	actorId uint64,
 	notificationType string,
 	content string,
 	relatedTaskId uint64,
-) error {
-	// 1. 如果接收人与触发人相同，直接返回，避免自己通知自己
+) (uint64, error) {
+	// 1. 如果接收人与触发人相同，直接返回 0
 	if receiverId == actorId {
-		return nil
+		return 0, nil
 	}
-	// 2. 向 MySQL 写入未读通知记录
-	result, err := dao.Notification.Ctx(ctx).Data(do.Notification{
+	// 2. 写入 MySQL notification
+	model := dao.Notification.Ctx(ctx)
+	if tx != nil {
+		model = tx.Model(dao.Notification.Table()).Ctx(ctx)
+	}
+	result, err := model.Data(do.Notification{
 		ReceiverId:    receiverId,
 		ActorId:       actorId,
 		Type:          notificationType,
 		Content:       content,
 		RelatedTaskId: relatedTaskId,
-		IsRead:        0, //默认未读
+		IsRead:        0,
 	}).Insert()
-	if err != nil { // MySQL 写入失败时，将通知内容放入重试队列，等待后台 worker 后续重试创建。
-		// 1. 组装 RetryNotificationPayload
-		// 2. 调用 EnqueueNotificationRetry
+	if err != nil {
+		return 0, err
+	}
+	// 3. 获取 notificationId
+	notificationId, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	// 4. 返回 notificationId
+	return uint64(notificationId), nil
+}
+
+// AddUnreadNotificationToRedis 只维护 Redis 未读集合。
+func AddUnreadNotificationToRedis(ctx context.Context, receiverId uint64, notificationId uint64) error {
+	// 1. notificationId 为 0 时直接返回
+	if notificationId == 0 {
+		return nil
+	}
+	// 2. SADD notification:unread:{receiverId} notificationId
+	_, err := g.Redis().SAdd(ctx, notificationUnreadKey(receiverId), notificationId)
+	// 3. 返回 error
+	return err
+}
+
+// CreateNotification 创建通知，并加入 Redis 未读集合。
+func CreateNotification(ctx context.Context, receiverId uint64, actorId uint64, notificationType string, content string, relatedTaskId uint64) error {
+	// 1. 调用 createNotificationRecord 写 MySQL
+	notificationId, err := CreateNotificationRecord(ctx, nil, receiverId, actorId, notificationType, content, relatedTaskId)
+	// 2. MySQL 写入失败时，进入 retry queue
+	if err != nil {
 		enqueueErr := EnqueueNotificationRetry(ctx, RetryNotificationPayload{
 			ReceiverId:       receiverId,
 			ActorId:          actorId,
@@ -181,26 +272,11 @@ func CreateNotification(
 			RelatedTaskId:    relatedTaskId,
 			RetryCount:       0,
 		})
-
-		// 3. 如果入队也失败，返回原始 err 或入队 err？
 		if enqueueErr != nil {
 			return enqueueErr
 		}
-
-		// 4. 返回 err
 		return err
 	}
-
-	// 3. 获取新增通知 ID
-	notificationId, err := result.LastInsertId()
-	if err != nil {
-		return err
-	}
-	// 4. 将通知 ID 加入 Redis 未读 Set
-	_, err = g.Redis().SAdd(ctx, notificationUnreadKey(receiverId), notificationId) //SAdd() 将一个或多个元素添加到集合中。
-	if err != nil {
-		return err
-	}
-	// 5. 返回 nil
-	return nil
+	// 3. 调用 addUnreadNotificationToRedis 写 Redis
+	return AddUnreadNotificationToRedis(ctx, receiverId, notificationId)
 }

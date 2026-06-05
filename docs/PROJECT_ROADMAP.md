@@ -1179,7 +1179,76 @@ go test ./... -count=1
 | README 演示路径 | ✅ 已补全推荐演示顺序 |
 | 全量自动测试 | ✅ `go test ./... -count=1` 通过 |
 
-## 18. 每日进展记录
+## 18. 毕业后 Redis 进阶学习路线
+
+当前项目已经覆盖 Redis 在业务系统里的主线用法：验证码、缓存、在线状态、未读集合、动态流、排行、限流、分布式锁、延迟提醒和通知重试队列。后续不再以“补项目功能”为主，而是以“小切片练工程能力”为主。
+
+### 推荐学习顺序
+
+| 顺序 | 主题 | 适合落点 | 学习目标 |
+| --- | --- | --- | --- |
+| 1 | Pipeline / MGET 批量优化 | 团队成员、任务列表、通知列表 | 减少循环 Redis 请求，提高批量读取效率 |
+| 2 | Lua 原子点赞 | `task:likes:{taskId}` | 将 `SADD + SCARD` 合成一次原子操作，返回是否新增与最新点赞数 |
+| 3 | Redis 事务对比练习 | `task:likes:{taskId}` 或计数类场景 | 学习 `WATCH`、`MULTI`、`EXEC`，对比 Lua 原子脚本的使用边界 |
+| 4 | MySQL 事务 + Redis 最终一致性 | 评论、通知、动态流 | 理解数据库事务能保证什么，Redis 写入失败时如何补偿或重试 |
+| 5 | 可靠队列 | `notification:retry:queue` | 从普通 List 重试队列升级为 pending 队列，避免 worker 取出后宕机导致消息丢失 |
+| 6 | Redis Stream | 通知事件或团队动态 | 学习 `XADD`、`XREADGROUP`、`XACK`、pending message 和消费组 |
+| 7 | 排行榜时间衰减 | `team:task:hot:{teamId}` | 练习日榜、周榜、热度衰减和榜单清理 |
+| 8 | Bitmap / HyperLogLog | 任务访问统计 | 练习签到、是否浏览、UV 估算等统计型场景 |
+| 9 | 布隆过滤器思想 | 任务详情缓存穿透 | 在空值缓存之外，学习“请求到 MySQL 前先判断 ID 是否可能存在” |
+
+当前事务练习进展：已完成 Redis 事务对比学习函数 `LikeTaskWithRedisTransaction`，并将评论创建中的 `task_comment`、`task_mentioned`、`task_commented` MySQL 写入纳入同一个事务；事务提交后再写 Redis 团队动态和通知未读集合，保持 MySQL 为真实数据源、Redis 最终一致。验证通过：`go test ./internal/logic/task -run 'TestCreateComment' -count=1`、`go test ./internal/logic/notification -count=1` 与 `go test ./... -count=1`。
+
+当前可靠队列进展：通知重试队列已从普通 `LPOP` 消费升级为 `LMOVE notification:retry:queue notification:retry:processing LEFT RIGHT`，worker 处理成功或失败后都会从 processing 队列 ACK 旧消息；失败且未超过最大重试次数时，再将 `retryCount+1` 的新 payload 重新入队，避免 worker 取出消息后宕机或失败重试时丢失、残留或重复入队。验证通过：`go test ./internal/logic/notification -run 'TestNotificationRetryQueue|TestProcessOneNotificationRetryAcksProcessingMessage' -count=1`、`go test ./internal/logic/notification -count=1` 与 `go test ./... -count=1`。
+
+### 下一次最推荐小切片：Lua 原子点赞
+
+当前点赞逻辑已经使用 Redis Set 保证同一用户不会重复点赞，但通常会分成多步：
+
+```text
+SADD task:likes:{taskId} userId
+SCARD task:likes:{taskId}
+```
+
+下一步可以用 Lua 把这两步合成一次 Redis 原子脚本：
+
+```text
+输入：taskId、userId
+执行：SADD + SCARD
+返回：是否本次新增点赞、当前点赞总数
+```
+
+这样可以练到三个重点：
+
+- Redis 多命令原子化。
+- 高并发下避免中间状态被其他请求插入。
+- 后端接口直接拿到最终点赞数，减少额外 Redis 往返。
+
+当前完成状态：已将 `LikeTask` 的点赞写入升级为 Lua 原子脚本，使用一次 `EVAL` 完成 `SADD + SCARD`，并保持原有权限校验、重复点赞幂等和点赞数返回行为。验证通过：`go test ./internal/logic/task -count=1` 与 `go test ./... -count=1`。
+
+### 事务练习说明
+
+后续会练两类事务，但它们解决的问题不同：
+
+| 类型 | 适合场景 | 重点 |
+| --- | --- | --- |
+| Redis 事务 | 点赞、计数、库存这类 Redis 内部并发更新 | `WATCH` 乐观锁、`MULTI/EXEC` 批量提交、失败后重试 |
+| MySQL 事务 | 多张数据库表必须一起成功或一起失败 | 例如评论写入、通知写入、业务记录状态更新 |
+
+注意：MySQL 事务不能把 Redis 写入一起回滚。涉及 MySQL + Redis 的场景，要用“先保证 MySQL 真实数据，再通过删除缓存、重试队列或补偿任务保证 Redis 最终一致”。
+
+### 进阶阶段仍然遵守的节奏
+
+```text
+1. 先讲清楚为什么要做这个 Redis 技术点
+2. 给空白代码框架
+3. 再给完整参考代码
+4. 你实现后 Codex 检查
+5. 小范围测试或联调
+6. 验收后更新本路线图
+```
+
+## 19. 每日进展记录
 
 ### 2026-05-27：今天完成了什么
 
@@ -1357,3 +1426,25 @@ go test ./... -count=1
 - 侧边栏 Redis 图例更新：补充点赞（Set）、通知重试队列（List）、延迟提醒（ZSet）。
 - 路线图里程碑 M1-M4 全部标记完成，项目进入毕业状态。
 - 验证通过：`go test ./... -count=1`。
+
+### 2026-06-05：今天完成了什么
+
+- 完成 Redis Lua 原子点赞练习：`LikeTask` 使用一次 `EVAL` 完成 `SADD + SCARD`，保持重复点赞幂等和点赞数返回。
+- 新增 Redis 事务对比学习函数 `LikeTaskWithRedisTransaction`，练习 `WATCH`、`MULTI`、`EXEC`、`DISCARD` 和重试流程。
+- 拆分通知创建职责：`CreateNotificationRecord` 只写 MySQL，`AddUnreadNotificationToRedis` 只维护 Redis 未读集合，为事务组合和最终一致性做准备。
+- 完成评论创建的 MySQL 事务改造：`task_comment`、`task_mentioned`、`task_commented` 通知记录在同一事务内提交，事务成功后再写 Redis 团队动态和未读集合。
+- 完成通知重试队列可靠队列第一阶段：使用 `LMOVE notification:retry:queue notification:retry:processing LEFT RIGHT` 将消息移动到 processing 队列，避免取出即丢。
+- 完成通知重试 ACK 机制：成功和失败路径都会从 processing 删除旧 raw；失败且未超过最大重试次数时，将 `retryCount+1` 的新 payload 重新入队。
+- 修复 retry worker 重复入队风险：worker 不再调用带失败入队逻辑的 `CreateNotification`，改为直接调用 `CreateNotificationRecord` 与 `AddUnreadNotificationToRedis`。
+- 补充可靠队列测试，覆盖 FIFO、processing 移动、成功 ACK、失败 ACK 后重入队；验证通过：`go test ./internal/logic/notification -count=1` 与 `go test ./... -count=1`。
+
+### 2026-06-06：下一步任务规划
+
+目标：继续围绕可靠队列收口，练习“处理中消息异常恢复”。
+
+建议顺序：
+
+1. 给 `notification:retry:processing` 增加补偿扫描设计：识别 worker 宕机后遗留的 processing 消息。
+2. 先实现一个手动恢复函数，将 processing 中的消息搬回 `notification:retry:queue`。
+3. 再考虑是否增加死信队列 `notification:retry:dead`，用于超过最大重试次数的 payload。
+4. 最后评估是否进入 Redis Stream 消费组，作为 List 可靠队列之后的进阶对比。
