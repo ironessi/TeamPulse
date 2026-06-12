@@ -31,6 +31,8 @@ const (
 	taskDetailNullExpire     = 60 * time.Second
 	taskDetailLockExpire     = 10 * time.Second
 	taskDetailWaitRetry      = 50 * time.Millisecond
+	taskHotDailyExpire       = 7 * 24 * time.Hour
+	taskHotWeeklyExpire      = 30 * 24 * time.Hour
 )
 
 // taskHotKey 生成团队热门任务排行榜 key。
@@ -196,7 +198,7 @@ func GetTask(ctx context.Context, userId uint64, taskId uint64) (*taskV1.TaskIte
 	}
 
 	// 7. 记录任务访问热度，用于热门任务排行榜。
-	if _, err := g.Redis().ZIncrBy(ctx, taskHotKey(task.TeamId), 1, task.Id); err != nil {
+	if err := increaseTaskHeat(ctx, task.TeamId, task.Id, 1); err != nil {
 		return nil, err
 	}
 
@@ -277,7 +279,7 @@ func UpdateTask(ctx context.Context, operatorId uint64, taskId uint64, title str
 		return err
 	}
 
-	if _, err = g.Redis().ZIncrBy(ctx, taskHotKey(task.TeamId), 1, task.Id); err != nil {
+	if err = increaseTaskHeat(ctx, task.TeamId, task.Id, 1); err != nil {
 		return err
 	}
 
@@ -343,7 +345,7 @@ func UpdateStatus(ctx context.Context, operatorId uint64, taskId uint64, status 
 	}
 
 	// 7. 更新任务热度
-	if _, err = g.Redis().ZIncrBy(ctx, taskHotKey(task.TeamId), 1, task.Id); err != nil {
+	if err = increaseTaskHeat(ctx, task.TeamId, task.Id, 1); err != nil {
 		return err
 	}
 	// 8. 如果任务有负责人，且负责人不是操作者本人，则创建状态变化通知
@@ -357,54 +359,7 @@ func UpdateStatus(ctx context.Context, operatorId uint64, taskId uint64, status 
 }
 
 func GetHotTasks(ctx context.Context, userId uint64, teamId uint64) ([]taskV1.HotTaskItem, error) {
-	// 1. 校验当前用户属于团队
-	count, err := dao.TeamMember.Ctx(ctx).Where("team_id", teamId).Where("user_id", userId).Count()
-	if err != nil {
-		return nil, err
-	}
-	if count == 0 {
-		return nil, gerror.New("你没有权限查看该团队的热门任务")
-	}
-
-	// 2. 从 Redis 读取热度最高的前 10 个 taskId
-	values, err := g.Redis().ZRevRange(ctx, taskHotKey(teamId), 0, 9)
-	if err != nil {
-		return nil, err
-	}
-
-	taskIds := values.Uints() // 把 Redis 读取出的字符串切片转换成 uint64 切片，得到热度最高的前 10 个 taskId。
-	if len(taskIds) == 0 {
-		return []taskV1.HotTaskItem{}, nil
-	}
-	// 3. 根据 taskId 查询 MySQL 中的任务
-	items := make([]taskV1.HotTaskItem, 0, len(taskIds))
-	for _, taskId := range taskIds {
-		var task entity.Task
-		err := dao.Task.Ctx(ctx).Where("id", taskId).Scan(&task)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		score, err := g.Redis().ZScore(ctx, taskHotKey(teamId), taskId) // 从 Redis 读取该 taskId 的热度分数，方便后续返回给前端展示。
-		if err != nil {
-			return nil, err
-		}
-
-		// 将 MySQL 中的任务信息和 Redis 中的热度分数组装成排行榜项。
-		items = append(items, taskV1.HotTaskItem{
-			TaskId:    task.Id,
-			Title:     task.Title,
-			Status:    task.Status,
-			Priority:  task.Priority,
-			ViewCount: uint64(score),
-		})
-
-	}
-	// 4. 组装带 viewCount 的排行榜结果
-
-	return items, nil
+	return getHotTasksByKey(ctx, userId, teamId, taskHotKey(teamId))
 }
 
 // deleteTaskDetailCache 删除任务详情缓存。
@@ -494,4 +449,116 @@ func getTaskFromDBAndCache(ctx context.Context, taskId uint64) (*entity.Task, er
 
 	// 4. 返回 task
 	return &task, nil
+}
+
+// taskHotDailyKey 生成团队热门任务日榜 key。
+func taskHotDailyKey(teamId uint64, now time.Time) string {
+	// 返回 team:task:hot:daily:{teamId}:{yyyyMMdd}
+	return fmt.Sprintf("team:task:hot:daily:%d:%s", teamId, now.Format("20060102"))
+}
+
+// increaseTaskHeat 增加任务热度。
+func increaseTaskHeat(ctx context.Context, teamId uint64, taskId uint64, score float64) error {
+	// 1. 写入总榜 team:task:hot:{teamId}
+	_, err := g.Redis().ZIncrBy(ctx, taskHotKey(teamId), score, taskId)
+	if err != nil {
+		return err
+	}
+	// 2. 生成今天的日榜 key
+	dailyKey := taskHotDailyKey(teamId, time.Now())
+	// 3. 写入日榜
+	_, err = g.Redis().ZIncrBy(ctx, dailyKey, score, taskId)
+	if err != nil {
+		return err
+	}
+	// 4. 给日榜设置过期时间
+	_, err = g.Redis().Expire(ctx, dailyKey, int64(taskHotDailyExpire.Seconds()))
+	if err != nil {
+		return err
+	}
+
+	// 5. 获取周榜 key
+	weeklyKey := taskHotWeeklyKey(teamId, time.Now())
+	// 6. 写入周榜
+	_, err = g.Redis().ZIncrBy(ctx, weeklyKey, score, taskId)
+	if err != nil {
+		return err
+	}
+	// 7. 给周榜设置过期时间
+	_, err = g.Redis().Expire(ctx, weeklyKey, int64(taskHotWeeklyExpire.Seconds()))
+	if err != nil {
+		return err
+	}
+
+	// 5. 返回 nil
+	return nil
+}
+
+func GetDailyHotTasks(ctx context.Context, userId uint64, teamId uint64, now time.Time) ([]taskV1.HotTaskItem, error) {
+	// 1. 生成日榜 key
+	key := taskHotDailyKey(teamId, now)
+	// 2. 复用 getHotTasksByKey 查询排行榜
+	return getHotTasksByKey(ctx, userId, teamId, key)
+}
+
+func GetWeeklyHotTasks(ctx context.Context, userId uint64, teamId uint64, now time.Time) ([]taskV1.HotTaskItem, error) {
+	key := taskHotWeeklyKey(teamId, now)
+	return getHotTasksByKey(ctx, userId, teamId, key)
+}
+
+func getHotTasksByKey(ctx context.Context, userId uint64, teamId uint64, hotKey string) ([]taskV1.HotTaskItem, error) {
+	// 1. 校验当前用户属于团队
+	count, err := dao.TeamMember.Ctx(ctx).Where("team_id", teamId).Where("user_id", userId).Count()
+	if err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		return nil, gerror.New("你没有权限查看该团队的热门任务")
+	}
+	// 2. 从 Redis 指定 key 读取前 10 个 taskId
+	values, err := g.Redis().ZRevRange(ctx, hotKey, 0, 9) // 从 Redis 获取数据
+	if err != nil {
+		return nil, err
+	}
+	taskIds := values.Uints()
+	// 3. 没有数据返回空切片
+	if len(taskIds) == 0 {
+		return []taskV1.HotTaskItem{}, nil
+	}
+	items := make([]taskV1.HotTaskItem, 0, len(taskIds))
+	// 4. 逐个查询 MySQL 任务
+	for _, taskId := range taskIds {
+		var task entity.Task
+		err := dao.Task.Ctx(ctx).Where("id", taskId).Scan(&task)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if task.Id == 0 {
+			continue
+		}
+		// 5. 查询该任务在指定 hotKey 中的分数
+		score, err := g.Redis().ZScore(ctx, hotKey, taskId) // 获取该任务在指定 hotKey 中的分数
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, taskV1.HotTaskItem{
+			TaskId:    task.Id,
+			Title:     task.Title,
+			Status:    task.Status,
+			Priority:  task.Priority,
+			ViewCount: uint64(score),
+		})
+	}
+	return items, nil
+}
+
+// taskHotWeeklyKey 生成团队热门任务周榜 key。
+func taskHotWeeklyKey(teamId uint64, now time.Time) string {
+	// 1. 从 now 计算 ISO 年份和周数
+	year, week := now.ISOWeek() // 获取 ISO 年份和周数
+	// 2. 返回 team:task:hot:weekly:{teamId}:{year}-{week}
+	return fmt.Sprintf("team:task:hot:weekly:%d:%d-%02d", teamId, year, week)
 }

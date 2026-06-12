@@ -227,11 +227,169 @@ func TestProcessOneNotificationRetryAcksProcessingMessageAndRequeuesOnFailure(t 
 	})
 }
 
+func TestProcessOneNotificationRetryMovesExceededRetryToDeadQueue(t *testing.T) {
+	ctx := gctx.New()
+	cleanNotificationRetryQueueForTest(t)
+
+	payload := RetryNotificationPayload{
+		ReceiverId:       915001,
+		ActorId:          915002,
+		NotificationType: TypeTaskReminder,
+		Content:          strings.Repeat("x", 300),
+		RelatedTaskId:    915003,
+		RetryCount:       notificationRetryMaxCount,
+	}
+
+	if err := EnqueueNotificationRetry(ctx, payload); err != nil {
+		t.Fatalf("enqueue retry failed: %v", err)
+	}
+
+	processed, err := ProcessOneNotificationRetry(ctx)
+	if err == nil {
+		t.Fatalf("process retry should return insert error for oversized content")
+	}
+	if !processed {
+		t.Fatalf("process retry should process one message")
+	}
+
+	for key, want := range map[string]int64{
+		notificationRetryQueueKey:      0,
+		notificationRetryProcessingKey: 0,
+		notificationRetryDeadKey:       1,
+	} {
+		length, readErr := g.Redis().LLen(ctx, key)
+		if readErr != nil {
+			t.Fatalf("read %s length failed: %v", key, readErr)
+		}
+		if length != want {
+			t.Fatalf("%s length should be %d, got %d", key, want, length)
+		}
+	}
+
+	values, err := g.Redis().Do(ctx, "LRANGE", notificationRetryDeadKey, 0, -1)
+	if err != nil {
+		t.Fatalf("read dead queue payload failed: %v", err)
+	}
+	rawValues := values.Vars()
+	if len(rawValues) != 1 {
+		t.Fatalf("dead queue should contain one payload, got %d", len(rawValues))
+	}
+
+	var dead RetryNotificationPayload
+	if err := json.Unmarshal([]byte(rawValues[0].String()), &dead); err != nil {
+		t.Fatalf("decode dead payload failed: %v", err)
+	}
+	if dead.RetryCount != notificationRetryMaxCount+1 {
+		t.Fatalf("dead payload retry count should be %d, got %d", notificationRetryMaxCount+1, dead.RetryCount)
+	}
+
+	t.Cleanup(func() {
+		cleanNotificationRetryQueueForTest(t)
+	})
+}
+
+func TestRecoverProcessingNotificationRetriesMovesProcessingMessagesBackToQueue(t *testing.T) {
+	ctx := gctx.New()
+	cleanNotificationRetryQueueForTest(t)
+
+	first := RetryNotificationPayload{
+		ReceiverId:       920001,
+		ActorId:          920002,
+		NotificationType: TypeTaskReminder,
+		Content:          "recover first",
+		RelatedTaskId:    920003,
+		RetryCount:       0,
+	}
+	second := RetryNotificationPayload{
+		ReceiverId:       920004,
+		ActorId:          920005,
+		NotificationType: TypeTaskCommented,
+		Content:          "recover second",
+		RelatedTaskId:    920006,
+		RetryCount:       1,
+	}
+
+	for _, payload := range []RetryNotificationPayload{first, second} {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal processing payload failed: %v", err)
+		}
+		if _, err := g.Redis().RPush(ctx, notificationRetryProcessingKey, string(data)); err != nil {
+			t.Fatalf("seed processing payload failed: %v", err)
+		}
+	}
+
+	recovered, err := RecoverProcessingNotificationRetries(ctx, 1)
+	if err != nil {
+		t.Fatalf("recover processing retries failed: %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("should recover one message with limit=1, got %d", recovered)
+	}
+
+	processingLength, err := g.Redis().LLen(ctx, notificationRetryProcessingKey)
+	if err != nil {
+		t.Fatalf("read processing length failed: %v", err)
+	}
+	if processingLength != 1 {
+		t.Fatalf("processing should keep one message after limited recover, got %d", processingLength)
+	}
+
+	queueLength, err := g.Redis().LLen(ctx, notificationRetryQueueKey)
+	if err != nil {
+		t.Fatalf("read queue length failed: %v", err)
+	}
+	if queueLength != 1 {
+		t.Fatalf("queue should receive one recovered message, got %d", queueLength)
+	}
+
+	recovered, err = RecoverProcessingNotificationRetries(ctx, 0)
+	if err != nil {
+		t.Fatalf("recover remaining processing retries failed: %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("default recover should move remaining one message, got %d", recovered)
+	}
+
+	processingLength, err = g.Redis().LLen(ctx, notificationRetryProcessingKey)
+	if err != nil {
+		t.Fatalf("read processing length after recover failed: %v", err)
+	}
+	if processingLength != 0 {
+		t.Fatalf("processing should be empty after recover, got %d", processingLength)
+	}
+
+	queueLength, err = g.Redis().LLen(ctx, notificationRetryQueueKey)
+	if err != nil {
+		t.Fatalf("read queue length after recover failed: %v", err)
+	}
+	if queueLength != 2 {
+		t.Fatalf("queue should contain two recovered messages, got %d", queueLength)
+	}
+
+	t.Cleanup(func() {
+		cleanNotificationRetryQueueForTest(t)
+	})
+}
+
+func TestRecoverProcessingNotificationRetriesEmptyQueueReturnsZero(t *testing.T) {
+	ctx := gctx.New()
+	cleanNotificationRetryQueueForTest(t)
+
+	recovered, err := RecoverProcessingNotificationRetries(ctx, 0)
+	if err != nil {
+		t.Fatalf("recover empty processing queue failed: %v", err)
+	}
+	if recovered != 0 {
+		t.Fatalf("empty processing queue should recover zero messages, got %d", recovered)
+	}
+}
+
 func cleanNotificationRetryQueueForTest(t *testing.T) {
 	t.Helper()
 	ctx := gctx.New()
 
-	if _, err := g.Redis().Del(ctx, notificationRetryQueueKey, notificationRetryProcessingKey); err != nil {
+	if _, err := g.Redis().Del(ctx, notificationRetryQueueKey, notificationRetryProcessingKey, notificationRetryDeadKey); err != nil {
 		t.Fatalf("clean notification retry queue failed: %v", err)
 	}
 }

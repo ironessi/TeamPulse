@@ -62,9 +62,16 @@ make deploy           # 通过 Kustomize 部署到 Kubernetes
 | 用户在线状态 | `presence:user:{userId}` | String | 60 秒 |
 | 团队在线成员 | `presence:team:{teamId}` | Set | 1 小时 |
 | 热门任务排行 | `team:task:hot:{teamId}` | Sorted Set | 无 |
+| 任务点赞 | `task:likes:{taskId}` | Set | 无 |
 | 通知未读集合 | `notification:unread:{userId}` | Set | 无 |
+| 延迟提醒 | `task:reminder` | Sorted Set | score 为提醒时间戳 |
+| 通知重试队列 | `notification:retry:queue` | List | 无 |
+| 通知重试处理中 | `notification:retry:processing` | List | 无 |
 | 创建任务限流 | `rate:task:create:{userId}:{minute}` | String Counter | 60 秒 |
 | 登录限流 | `rate:login:{ip}:{minute}` | String Counter | 60 秒 |
+| 任务详情锁 | `lock:task:detail:{taskId}` | String NX | 10 秒 |
+| 提醒扫描锁 | `lock:task:reminder:scanner` | String NX | 4 秒 |
+| 重试 worker 锁 | `lock:notification:retry:worker` | String NX | 4 秒 |
 
 所有 Redis 操作集中在 `internal/logic/` 层。
 
@@ -90,6 +97,22 @@ make deploy           # 通过 Kustomize 部署到 Kubernetes
 - **热门任务排行**：使用 Redis Sorted Set，成员为任务 ID，分数为热度值（每次查看/编辑/状态变更累加），按分数降序获取热门任务
 - **通知未读集合**：Redis Set 存储未读 notificationId，创建通知时 SAdd，标记已读时 SRem，计数用 SCard；集合为空时从 MySQL 重建
 - **滑动窗口限流**：Redis INCR + EXPIRE 实现每分钟计数器，创建任务限 10 次/用户/分钟，登录限 5 次/IP/分钟
+
+## 后台 Worker
+
+服务启动时在 `internal/cmd/cmd.go` 启动两个后台 goroutine：
+
+- **提醒扫描**（`task.StartReminderScanner`）：每 5 秒扫描 Redis ZSet `task:reminder` 中到期的任务，给负责人创建通知。使用分布式锁 `lock:task:reminder:scanner` 防止多实例重复扫描。
+- **通知重试**（`notification.StartNotificationRetryWorker`）：每 5 秒从 `notification:retry:queue` 取出失败通知重试创建。使用 `LMOVE` 保证消息不丢失，分布式锁 `lock:notification:retry:worker` 防止多实例重复处理。
+
+## 测试与验证
+
+```bash
+go test ./... -count=1              # 所有单元测试（需要本地 MySQL + Redis）
+bash hack/smoke-test.sh             # 全链路 smoke test（需要服务运行中）
+```
+
+测试文件位于 `internal/logic/` 各子包中，使用 `t.Cleanup` 清理 Redis key 和 MySQL 数据。
 
 ## 代码约定
 

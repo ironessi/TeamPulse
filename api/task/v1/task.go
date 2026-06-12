@@ -97,3 +97,30 @@ type HotTaskItem struct {
 type HotRes struct {
 	Tasks []HotTaskItem `json:"tasks"`
 }
+
+// DailyHotReq 是查询团队今日热门任务请求。
+type DailyHotReq struct {
+	// GET /teams/{teamId}/tasks/hot/daily
+	g.Meta `path:"/teams/{teamId}/tasks/hot/daily" method:"get" tags:"Task" summary:"查询团队今日热门任务"`
+	// teamId 路径参数
+	TeamId uint64 `json:"teamId" v:"required|min:1#团队ID不能为空|团队ID不合法"`
+}
+
+// DailyHotRes 是查询团队今日热门任务响应。
+type DailyHotRes struct {
+	// 复用 HotTaskItem
+	Tasks []HotTaskItem `json:"tasks"`
+}
+
+// WeeklyHotReq 是查询团队本周热门任务请求。
+type WeeklyHotReq struct {
+	g.Meta `path:"/teams/{teamId}/tasks/hot/weekly" method:"get" tags:"Task" summary:"查询团队本周热门任务"`
+	// TODO: teamId 路径参数，必填，最小值 1
+	TeamId uint64 `json:"teamId" v:"required|min:1#团队ID不能为空|团队ID不合法"`
+}
+
+// WeeklyHotRes 是查询团队本周热门任务响应。
+type WeeklyHotRes struct {
+	// TODO: 复用 HotTaskItem
+	Tasks []HotTaskItem `json:"tasks"`
+}

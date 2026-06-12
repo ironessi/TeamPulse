@@ -1185,46 +1185,40 @@ go test ./... -count=1
 
 ### 推荐学习顺序
 
-| 顺序 | 主题 | 适合落点 | 学习目标 |
-| --- | --- | --- | --- |
-| 1 | Pipeline / MGET 批量优化 | 团队成员、任务列表、通知列表 | 减少循环 Redis 请求，提高批量读取效率 |
-| 2 | Lua 原子点赞 | `task:likes:{taskId}` | 将 `SADD + SCARD` 合成一次原子操作，返回是否新增与最新点赞数 |
-| 3 | Redis 事务对比练习 | `task:likes:{taskId}` 或计数类场景 | 学习 `WATCH`、`MULTI`、`EXEC`，对比 Lua 原子脚本的使用边界 |
-| 4 | MySQL 事务 + Redis 最终一致性 | 评论、通知、动态流 | 理解数据库事务能保证什么，Redis 写入失败时如何补偿或重试 |
-| 5 | 可靠队列 | `notification:retry:queue` | 从普通 List 重试队列升级为 pending 队列，避免 worker 取出后宕机导致消息丢失 |
-| 6 | Redis Stream | 通知事件或团队动态 | 学习 `XADD`、`XREADGROUP`、`XACK`、pending message 和消费组 |
-| 7 | 排行榜时间衰减 | `team:task:hot:{teamId}` | 练习日榜、周榜、热度衰减和榜单清理 |
-| 8 | Bitmap / HyperLogLog | 任务访问统计 | 练习签到、是否浏览、UV 估算等统计型场景 |
-| 9 | 布隆过滤器思想 | 任务详情缓存穿透 | 在空值缓存之外，学习“请求到 MySQL 前先判断 ID 是否可能存在” |
+| 顺序 | 主题 | 适合落点 | 学习目标 | 状态 |
+| --- | --- | --- | --- | --- |
+| 1 | Pipeline / MGET 批量优化 | 团队在线成员查询 | 减少循环 Redis 请求，提高批量读取效率 | ✅ 已完成 |
+| 2 | Lua 原子点赞 | `task:likes:{taskId}` | 将 `SADD + SCARD` 合成一次原子操作，返回是否新增与最新点赞数 | ✅ 已完成 |
+| 3 | Redis 事务对比练习 | `task:likes:{taskId}` 或计数类场景 | 学习 `WATCH`、`MULTI`、`EXEC`，对比 Lua 原子脚本的使用边界 | ✅ 已完成 |
+| 4 | MySQL 事务 + Redis 最终一致性 | 评论、通知、动态流 | 理解数据库事务能保证什么，Redis 写入失败时如何补偿或重试 | ✅ 已完成 |
+| 5 | 可靠队列 | `notification:retry:queue` | 从普通 List 重试队列升级为 pending 队列，避免 worker 取出后宕机导致消息丢失 | ✅ 已完成 |
+| 6 | Redis Stream | 通知事件或团队动态 | 学习 `XADD`、`XREADGROUP`、`XACK`、pending message 和消费组 | ✅ 已完成 |
+| 7 | 排行榜时间衰减 | `team:task:hot:{teamId}` | 日榜/周榜已实现，热度衰减 Lua 脚本已完成 | ✅ 已完成 |
+| 8 | 过期榜单自动清理 | 日榜/周榜 key | SCAN 定期清理过期榜单，控制 Redis 内存 | ❌ 未做 |
+| 9 | Bitmap / HyperLogLog | 任务访问统计 | 练习签到、是否浏览、UV 估算等统计型场景 | ❌ 未做 |
+| 10 | 布隆过滤器思想 | 任务详情缓存穿透 | 在空值缓存之外，学习”请求到 MySQL 前先判断 ID 是否可能存在” | ❌ 未做 |
 
 当前事务练习进展：已完成 Redis 事务对比学习函数 `LikeTaskWithRedisTransaction`，并将评论创建中的 `task_comment`、`task_mentioned`、`task_commented` MySQL 写入纳入同一个事务；事务提交后再写 Redis 团队动态和通知未读集合，保持 MySQL 为真实数据源、Redis 最终一致。验证通过：`go test ./internal/logic/task -run 'TestCreateComment' -count=1`、`go test ./internal/logic/notification -count=1` 与 `go test ./... -count=1`。
 
 当前可靠队列进展：通知重试队列已从普通 `LPOP` 消费升级为 `LMOVE notification:retry:queue notification:retry:processing LEFT RIGHT`，worker 处理成功或失败后都会从 processing 队列 ACK 旧消息；失败且未超过最大重试次数时，再将 `retryCount+1` 的新 payload 重新入队，避免 worker 取出消息后宕机或失败重试时丢失、残留或重复入队。验证通过：`go test ./internal/logic/notification -run 'TestNotificationRetryQueue|TestProcessOneNotificationRetryAcksProcessingMessage' -count=1`、`go test ./internal/logic/notification -count=1` 与 `go test ./... -count=1`。
 
-### 下一次最推荐小切片：Lua 原子点赞
+当前 Redis Stream 进展：已完成 `notification:events` 通知事件流，支持 `XADD` 发布、`XGROUP CREATE ... MKSTREAM` 创建消费组、`XREADGROUP` 读取新消息、`XACK` 确认、`XPENDING` 观察 Pending 数量、`XAUTOCLAIM` 接管超时 Pending 消息，并接入 `StartNotificationEventWorker(ctx)` 后台 worker。验证通过：`go test ./internal/logic/notification -count=1` 与 `go test ./... -count=1`；手工联调已验证 Stream worker 能自动消费消息、创建 MySQL 通知、写入 `notification:unread:{receiverId}` 并清空 Pending。
 
-当前点赞逻辑已经使用 Redis Set 保证同一用户不会重复点赞，但通常会分成多步：
+### 下一次最推荐小切片：排行榜时间衰减
 
-```text
-SADD task:likes:{taskId} userId
-SCARD task:likes:{taskId}
-```
-
-下一步可以用 Lua 把这两步合成一次 Redis 原子脚本：
+当前点赞、可靠队列和 Stream 消费组都已完成，下一步如果继续练 Redis，可以围绕 `team:task:hot:{teamId}` 做排行榜时间衰减：
 
 ```text
-输入：taskId、userId
-执行：SADD + SCARD
-返回：是否本次新增点赞、当前点赞总数
+日榜：team:task:hot:daily:{teamId}:{yyyyMMdd}
+周榜：team:task:hot:weekly:{teamId}:{yyyy-WW}
+热度衰减：定时降低旧任务分数或按时间窗口聚合
 ```
 
 这样可以练到三个重点：
 
-- Redis 多命令原子化。
-- 高并发下避免中间状态被其他请求插入。
-- 后端接口直接拿到最终点赞数，减少额外 Redis 往返。
-
-当前完成状态：已将 `LikeTask` 的点赞写入升级为 Lua 原子脚本，使用一次 `EVAL` 完成 `SADD + SCARD`，并保持原有权限校验、重复点赞幂等和点赞数返回行为。验证通过：`go test ./internal/logic/task -count=1` 与 `go test ./... -count=1`。
+- ZSet 排行榜按时间维度拆分。
+- 热门任务不再永久占榜。
+- 定时清理过期榜单，控制 Redis key 数量。
 
 ### 事务练习说明
 
@@ -1448,3 +1442,56 @@ go test ./... -count=1
 2. 先实现一个手动恢复函数，将 processing 中的消息搬回 `notification:retry:queue`。
 3. 再考虑是否增加死信队列 `notification:retry:dead`，用于超过最大重试次数的 payload。
 4. 最后评估是否进入 Redis Stream 消费组，作为 List 可靠队列之后的进阶对比。
+
+### 2026-06-11：今天完成了什么
+
+- 完成 Redis Stream 通知事件流 `notification:events`。
+- 新增 `PublishNotificationEvent`，使用 `XADD` 写入通知事件 payload。
+- 新增 `EnsureNotificationEventGroup`，使用 `XGROUP CREATE ... MKSTREAM` 初始化消费组，已存在时幂等跳过。
+- 新增 `ReadOneNotificationEvent`，使用 `XREADGROUP GROUP notification-workers consumer COUNT 1 STREAMS notification:events >` 读取新消息。
+- 适配 GoFrame Redis 返回结构：`XREADGROUP` 结果按 `map[streamKey]messages` 解析。
+- 新增 `AckNotificationEvent`，使用 `XACK` 确认处理完成的消息。
+- 新增 `GetNotificationEventPendingCount`，使用 `XPENDING` 观察消费组 Pending 消息数量。
+- 新增 `ClaimOnePendingNotificationEvent`，使用 `XAUTOCLAIM` 接管超时未确认的 Pending 消息。
+- 新增 `ProcessOneNotificationEvent` 与 `ProcessOneClaimedNotificationEvent`，将 Stream 消息落库为 MySQL 通知、写入 Redis 未读集合并最终 `XACK`。
+- 新增 `StartNotificationEventWorker(ctx)`，服务启动后定时优先消费新消息，没有新消息时再尝试接管超时 Pending。
+- 在 `internal/cmd/cmd.go` 接入 Stream 通知事件 worker。
+- 补充 Stream 自动测试，覆盖发布、读取、确认、Pending 统计、超时接管、新消息处理和接管后处理闭环。
+- 完成手工联调：`XADD notification:events` 后 worker 自动创建 MySQL 通知 `id=377`，写入 `notification:unread:2`，`XPENDING` 返回 0；联调通知与 Stream key 已清理，未读集合需执行 `SREM notification:unread:2 377` 完成最后清理。
+
+验证通过：
+
+```bash
+go test ./internal/logic/notification ./internal/cmd -count=1
+go test ./... -count=1
+```
+
+### 2026-06-12：今天完成了什么
+
+- 完成 Pipeline 批量优化练习：将 `GetOnlineMembers` 中逐条 `EXISTS` 改为 `Pipeline()` 批量执行，一次网络往返检查所有候选用户。
+- 使用 GoFrame 的 `g.Redis().Client()` 拿到底层 `redis.UniversalClient`，断言后调用 `Pipeline()`。
+- 完成热度衰减算法练习：新增 `internal/logic/task/heat_decay.go`。
+- 使用 Lua 脚本原子完成"读取 ZSet 所有成员分数 → 乘以衰减系数 → 写回"，避免并发覆盖。
+- 使用 SCAN 遍历所有团队总榜 key（`team:task:hot:*`），过滤掉日榜和周榜。
+- 新增后台 worker `StartHeatDecayWorker`，每小时触发一次，使用分布式锁防止多实例重复衰减。
+- 补充自动测试，覆盖单次衰减分数变为 90%、连续衰减分数持续下降、日榜和周榜不受影响。
+- 在 `internal/cmd/cmd.go` 注册热度衰减 worker。
+
+验证通过：
+
+```bash
+go test ./internal/logic/task -run 'TestDecayTeamHotScore' -count=1 -v
+go test ./... -count=1
+```
+
+### 2026-06-12：下一步任务规划
+
+目标：进入过期榜单自动清理练习，用 SCAN 定期清理长期不活跃团队的日榜/周榜 key。
+
+建议顺序：
+
+1. 先梳理当前日榜/周榜 key 的 TTL 和生成方式。
+2. 设计扫描函数：用 SCAN 查找 `team:task:hot:daily:*` 和 `team:task:hot:weekly:*`。
+3. 对每个 key 检查 TTL，已过期或接近过期的主动删除。
+4. 新增后台 worker，使用分布式锁防止多实例重复清理。
+5. 补充测试，覆盖过期 key 被清理、未过期 key 保留。

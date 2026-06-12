@@ -9,6 +9,7 @@ import (
 
 	"github.com/gogf/gf/v2/errors/gerror"
 	"github.com/gogf/gf/v2/frame/g"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 const (
@@ -76,21 +77,38 @@ func GetOnlineMembers(ctx context.Context, userId uint64, teamId uint64) ([]enti
 
 	onlineUserIds := make([]uint64, 0, len(values)) //切片预分配空间，避免多次扩容
 
-	for _, value := range values {
-		userId := value.Uint64() //将字符串转换为 uint64。
+	// 用 Pipeline 批量 EXISTS，一次网络往返检查所有候选用户
+	client := g.Redis().Client()                            // 获取 Redis 客户端
+	universalClient, ok := client.(goredis.UniversalClient) // 类型断言
+	if !ok {
+		return nil, gerror.New("无法获取 Redis UniversalClient")
+	}
 
-		// 判断用户在线 key 是否还存在。不存在说明 TTL 已过期，用户已离线。
-		exists, err := g.Redis().Exists(ctx, presenceUserKey(userId))
-		if err != nil {
-			return []entity.User{}, err
-		}
-		if exists > 0 {
-			onlineUserIds = append(onlineUserIds, userId)
-			continue
-		}
+	pipe := universalClient.Pipeline() // 创建 Pipeline
+	cmds := make([]*goredis.IntCmd, len(values))
+	for i, value := range values {
+		cmds[i] = pipe.Exists(ctx, presenceUserKey(value.Uint64()))
+	}
+	if _, err := pipe.Exec(ctx); err != nil { // 3. 一次网络往返，批量发给 Redis
+		return nil, err
+	}
 
-		// 顺手清理团队 Set 中的离线用户，避免脏数据长期堆积。
-		if _, err := g.Redis().SRem(ctx, teamKey, userId); err != nil { //SRem() 移除集合中的元素。
+	// 遍历 Pipeline 结果，收集在线用户，清理离线用户
+	offlineUserIds := make([]any, 0)
+	for i, cmd := range cmds {
+		uid := values[i].Uint64()
+
+		// 4. 从每个命令对象读结果
+		if cmd.Val() > 0 {
+			onlineUserIds = append(onlineUserIds, uid)
+		} else {
+			offlineUserIds = append(offlineUserIds, uid)
+		}
+	}
+
+	// 不在线的用户，顺手 SRem 清理团队 Set
+	if len(offlineUserIds) > 0 {
+		if _, err := g.Redis().SRem(ctx, teamKey, offlineUserIds[0], offlineUserIds[1:]...); err != nil {
 			return nil, err
 		}
 	}

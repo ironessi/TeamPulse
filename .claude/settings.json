@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test *)",
+      "Bash(go build *)",
+      "Bash(curl -s http://localhost:8000/ -o /dev/null -w \"%{http_code}\")",
+      "Bash(go run main.go &>/tmp/teampulse.log & *)",
+      "Bash(bash hack/smoke-test.sh)"
+    ],
+    "additionalDirectories": [
+      "/private/tmp"
+    ]
+  }
+}

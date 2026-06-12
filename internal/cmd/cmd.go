@@ -31,6 +31,12 @@ var (
 			// 2. 启动通知重试 worker
 			notificationLogic.StartNotificationRetryWorker(ctx)
 
+			// 启动 Stream 通知事件 worker。
+			notificationLogic.StartNotificationEventWorker(ctx)
+
+			// 启动后台热度衰减 worker，定期降低排行榜分数。
+			taskLogic.StartHeatDecayWorker(ctx)
+
 			// 将 resource/public 作为静态资源目录，浏览器访问 / 时会加载前端页面。
 			s.SetServerRoot("resource/public")
 			s.Group("/", func(group *ghttp.RouterGroup) {

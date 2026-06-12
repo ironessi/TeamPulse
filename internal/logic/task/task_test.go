@@ -61,6 +61,82 @@ func TestGetTaskCachesNullForMissingTask(t *testing.T) {
 	}
 }
 
+func TestIncreaseTaskHeatWritesTotalAndDailyRank(t *testing.T) {
+	ctx := gctx.New()
+	teamId := uint64(990001)
+	taskId := uint64(990002)
+
+	totalKey := taskHotKey(teamId)
+	dailyKey := taskHotDailyKey(teamId, time.Now())
+	weeklyKey := taskHotWeeklyKey(teamId, time.Now())
+
+	t.Cleanup(func() {
+		if _, err := g.Redis().Del(ctx, totalKey); err != nil {
+			t.Errorf("clean total hot key failed: %v", err)
+		}
+		if _, err := g.Redis().Del(ctx, dailyKey); err != nil {
+			t.Errorf("clean daily hot key failed: %v", err)
+		}
+		if _, err := g.Redis().Del(ctx, weeklyKey); err != nil {
+			t.Errorf("clean weekly hot key failed: %v", err)
+		}
+	})
+
+	if _, err := g.Redis().Del(ctx, totalKey); err != nil {
+		t.Fatalf("prepare total hot key failed: %v", err)
+	}
+	if _, err := g.Redis().Del(ctx, dailyKey); err != nil {
+		t.Fatalf("prepare daily hot key failed: %v", err)
+	}
+	if _, err := g.Redis().Del(ctx, weeklyKey); err != nil {
+		t.Fatalf("prepare weekly hot key failed: %v", err)
+	}
+
+	if err := increaseTaskHeat(ctx, teamId, taskId, 1); err != nil {
+		t.Fatalf("increase task heat failed: %v", err)
+	}
+
+	totalScore, err := g.Redis().ZScore(ctx, totalKey, taskId)
+	if err != nil {
+		t.Fatalf("read total hot score failed: %v", err)
+	}
+	if totalScore != 1 {
+		t.Fatalf("total hot score should be 1, got %v", totalScore)
+	}
+
+	dailyScore, err := g.Redis().ZScore(ctx, dailyKey, taskId)
+	if err != nil {
+		t.Fatalf("read daily hot score failed: %v", err)
+	}
+	if dailyScore != 1 {
+		t.Fatalf("daily hot score should be 1, got %v", dailyScore)
+	}
+
+	ttl, err := g.Redis().TTL(ctx, dailyKey)
+	if err != nil {
+		t.Fatalf("read daily hot ttl failed: %v", err)
+	}
+	if ttl <= 0 {
+		t.Fatalf("daily hot key should have ttl, got %d", ttl)
+	}
+
+	weeklyScore, err := g.Redis().ZScore(ctx, weeklyKey, taskId)
+	if err != nil {
+		t.Fatalf("read weekly hot score failed: %v", err)
+	}
+	if weeklyScore != 1 {
+		t.Fatalf("weekly hot score should be 1, got %v", weeklyScore)
+	}
+
+	weeklyTTL, err := g.Redis().TTL(ctx, weeklyKey)
+	if err != nil {
+		t.Fatalf("read weekly hot ttl failed: %v", err)
+	}
+	if weeklyTTL <= 0 {
+		t.Fatalf("weekly hot key should have ttl, got %d", weeklyTTL)
+	}
+}
+
 func TestGetTaskCachesExistingTaskAndKeepsPermissionCheck(t *testing.T) {
 	ctx := gctx.New()
 	task, memberId, outsiderId := updateTaskTestFixture(t)
@@ -1658,5 +1734,434 @@ func removeTaskLikeKeyForTest(t *testing.T, taskId uint64) {
 
 	if _, err := g.Redis().Del(ctx, taskLikeKey(taskId)); err != nil {
 		t.Errorf("remove task like key failed: %v", err)
+	}
+}
+
+func TestCreateTaskSuccess(t *testing.T) {
+	ctx := gctx.New()
+	teamId, memberId, _ := createTaskTestFixture(t)
+	activityKey := fmt.Sprintf("team:activities:%d", teamId)
+	title := fmt.Sprintf("test-create-task-%d", time.Now().UnixNano())
+	description := "test create task description"
+
+	taskId, err := CreateTask(ctx, memberId, teamId, title, description, 0, 2)
+	if err != nil {
+		t.Fatalf("CreateTask failed: %v", err)
+	}
+	if taskId == 0 {
+		t.Fatal("created task id should not be zero")
+	}
+
+	t.Cleanup(func() {
+		cleanupCreatedTask(t, taskId, teamId)
+	})
+
+	var created entity.Task
+	if err := dao.Task.Ctx(ctx).Where("id", taskId).Scan(&created); err != nil {
+		t.Fatalf("query created task failed: %v", err)
+	}
+	if created.Id != taskId ||
+		created.TeamId != teamId ||
+		created.CreatorId != memberId ||
+		created.Title != title ||
+		created.Description != description ||
+		created.Status != TaskStatusTodo ||
+		created.Priority != 2 {
+		t.Fatalf("unexpected created task: %+v", created)
+	}
+	if created.AssigneeId != 0 {
+		t.Fatalf("created task assignee should be 0, got %d", created.AssigneeId)
+	}
+
+	activityValue, err := g.Redis().LIndex(ctx, activityKey, 0)
+	if err != nil {
+		t.Fatalf("read create task activity failed: %v", err)
+	}
+	if !strings.Contains(activityValue.String(), "task_created") {
+		t.Fatalf("create task activity should contain task_created, got %q", activityValue.String())
+	}
+}
+
+func TestCreateTaskWithAssignee(t *testing.T) {
+	ctx := gctx.New()
+	teamId, memberId, assigneeId := createTaskTestFixture(t)
+	title := fmt.Sprintf("test-create-assignee-%d", time.Now().UnixNano())
+
+	taskId, err := CreateTask(ctx, memberId, teamId, title, "with assignee", assigneeId, 1)
+	if err != nil {
+		t.Fatalf("CreateTask with assignee failed: %v", err)
+	}
+
+	t.Cleanup(func() {
+		cleanupCreatedTask(t, taskId, teamId)
+	})
+
+	var created entity.Task
+	if err := dao.Task.Ctx(ctx).Where("id", taskId).Scan(&created); err != nil {
+		t.Fatalf("query created task failed: %v", err)
+	}
+	if created.AssigneeId != assigneeId {
+		t.Fatalf("created task assignee should be %d, got %d", assigneeId, created.AssigneeId)
+	}
+}
+
+func TestCreateTaskRejectsNonMember(t *testing.T) {
+	ctx := gctx.New()
+	task, _, outsiderId := updateTaskTestFixture(t)
+
+	taskId, err := CreateTask(ctx, outsiderId, task.TeamId, "should fail", "desc", 0, 1)
+	if err == nil {
+		t.Fatalf("CreateTask should reject non-member, got taskId=%d", taskId)
+	}
+	if !strings.Contains(err.Error(), "你不是该团队成员") {
+		t.Fatalf("unexpected non-member error: %v", err)
+	}
+}
+
+func TestCreateTaskRejectsAssigneeOutsideTeam(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, outsiderId := updateTaskTestFixture(t)
+
+	taskId, err := CreateTask(ctx, memberId, task.TeamId, "should fail", "desc", outsiderId, 1)
+	if err == nil {
+		t.Fatalf("CreateTask should reject outsider assignee, got taskId=%d", taskId)
+	}
+	if !strings.Contains(err.Error(), "负责人不是该团队成员") {
+		t.Fatalf("unexpected outsider assignee error: %v", err)
+	}
+}
+
+func TestGetTasksSuccess(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, _ := statusNotificationTestFixture(t)
+
+	items, err := GetTasks(ctx, memberId, task.TeamId)
+	if err != nil {
+		t.Fatalf("GetTasks failed: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("GetTasks should return at least one task")
+	}
+
+	found := false
+	for _, item := range items {
+		if item.TaskId == task.Id {
+			found = true
+			if item.Title != task.Title ||
+				item.CreatorId != task.CreatorId ||
+				item.Status != task.Status {
+				t.Fatalf("unexpected task item: %+v", item)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("fixture task %d not found in GetTasks result: %+v", task.Id, items)
+	}
+}
+
+func TestGetTasksRejectsNonMember(t *testing.T) {
+	ctx := gctx.New()
+	task, _, outsiderId := updateTaskTestFixture(t)
+
+	_, err := GetTasks(ctx, outsiderId, task.TeamId)
+	if err == nil {
+		t.Fatal("GetTasks should reject non-member")
+	}
+	if !strings.Contains(err.Error(), "你没有权限查看该团队的任务") {
+		t.Fatalf("unexpected non-member error: %v", err)
+	}
+}
+
+func TestGetHotTasksReturnsRankedTasks(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, _ := statusNotificationTestFixture(t)
+	totalKey := taskHotKey(task.TeamId)
+	dailyKey := taskHotDailyKey(task.TeamId, time.Now())
+
+	if _, err := g.Redis().Del(ctx, totalKey, dailyKey); err != nil {
+		t.Fatalf("clean hot keys before test failed: %v", err)
+	}
+	if err := increaseTaskHeat(ctx, task.TeamId, task.Id, 42); err != nil {
+		t.Fatalf("prepare task heat failed: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if _, err := g.Redis().Del(ctx, totalKey, dailyKey); err != nil {
+			t.Errorf("clean hot keys failed: %v", err)
+		}
+	})
+
+	items, err := GetHotTasks(ctx, memberId, task.TeamId)
+	if err != nil {
+		t.Fatalf("GetHotTasks failed: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("GetHotTasks should return at least one task")
+	}
+
+	found := false
+	for _, item := range items {
+		if item.TaskId == task.Id {
+			found = true
+			if item.Title != task.Title ||
+				item.Status != task.Status ||
+				item.Priority != task.Priority {
+				t.Fatalf("unexpected hot task item: %+v", item)
+			}
+			if item.ViewCount != 42 {
+				t.Fatalf("hot task viewCount should be 42, got %d", item.ViewCount)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("fixture task %d not found in GetHotTasks result: %+v", task.Id, items)
+	}
+}
+
+func TestGetDailyHotTasksReturnsRankedTasks(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, _ := statusNotificationTestFixture(t)
+	now := time.Date(2026, 6, 12, 10, 0, 0, 0, time.Local)
+	totalKey := taskHotKey(task.TeamId)
+	todayKey := taskHotDailyKey(task.TeamId, time.Now())
+	dailyKey := taskHotDailyKey(task.TeamId, now)
+
+	if _, err := g.Redis().Del(ctx, totalKey, todayKey, dailyKey); err != nil {
+		t.Fatalf("clean hot keys before test failed: %v", err)
+	}
+	if _, err := g.Redis().ZIncrBy(ctx, dailyKey, 7, task.Id); err != nil {
+		t.Fatalf("prepare daily task heat failed: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if _, err := g.Redis().Del(ctx, totalKey, todayKey, dailyKey); err != nil {
+			t.Errorf("clean daily hot keys failed: %v", err)
+		}
+	})
+
+	items, err := GetDailyHotTasks(ctx, memberId, task.TeamId, now)
+	if err != nil {
+		t.Fatalf("GetDailyHotTasks failed: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("GetDailyHotTasks should return at least one task")
+	}
+	if items[0].TaskId != task.Id {
+		t.Fatalf("daily hot first task should be %d, got %+v", task.Id, items[0])
+	}
+	if items[0].ViewCount != 7 {
+		t.Fatalf("daily hot viewCount should be 7, got %d", items[0].ViewCount)
+	}
+}
+
+func TestGetWeeklyHotTasksReturnsRankedTasks(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, _ := statusNotificationTestFixture(t)
+	// 2026-06-08 是周一，与 time.Now() 所在周不一定相同，因此测试构造一个固定日期。
+	now := time.Date(2026, 6, 8, 10, 0, 0, 0, time.Local)
+	totalKey := taskHotKey(task.TeamId)
+	thisWeekKey := taskHotWeeklyKey(task.TeamId, time.Now())
+	weeklyKey := taskHotWeeklyKey(task.TeamId, now)
+
+	// 清理可能残留的 key，确保测试环境干净。
+	if _, err := g.Redis().Del(ctx, totalKey, thisWeekKey, weeklyKey); err != nil {
+		t.Fatalf("clean hot keys before test failed: %v", err)
+	}
+	// 直接写入周榜热度，绕过 increaseTaskHeat，避免干扰总榜和日榜。
+	if _, err := g.Redis().ZIncrBy(ctx, weeklyKey, 5, task.Id); err != nil {
+		t.Fatalf("prepare weekly task heat failed: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if _, err := g.Redis().Del(ctx, totalKey, thisWeekKey, weeklyKey); err != nil {
+			t.Errorf("clean weekly hot keys failed: %v", err)
+		}
+	})
+
+	items, err := GetWeeklyHotTasks(ctx, memberId, task.TeamId, now)
+	if err != nil {
+		t.Fatalf("GetWeeklyHotTasks failed: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("GetWeeklyHotTasks should return at least one task")
+	}
+	if items[0].TaskId != task.Id {
+		t.Fatalf("weekly hot first task should be %d, got %+v", task.Id, items[0])
+	}
+	if items[0].ViewCount != 5 {
+		t.Fatalf("weekly hot viewCount should be 5, got %d", items[0].ViewCount)
+	}
+}
+
+func TestGetHotTasksRejectsNonMember(t *testing.T) {
+	ctx := gctx.New()
+	task, _, outsiderId := updateTaskTestFixture(t)
+
+	_, err := GetHotTasks(ctx, outsiderId, task.TeamId)
+	if err == nil {
+		t.Fatal("GetHotTasks should reject non-member")
+	}
+	if !strings.Contains(err.Error(), "你没有权限查看该团队的热门任务") {
+		t.Fatalf("unexpected non-member error: %v", err)
+	}
+}
+
+func TestGetHotTasksReturnsEmptyForNoHeatData(t *testing.T) {
+	ctx := gctx.New()
+	task, memberId, _ := statusNotificationTestFixture(t)
+	totalKey := taskHotKey(task.TeamId)
+	dailyKey := taskHotDailyKey(task.TeamId, time.Now())
+
+	if _, err := g.Redis().Del(ctx, totalKey, dailyKey); err != nil {
+		t.Fatalf("clean hot keys before test failed: %v", err)
+	}
+
+	items, err := GetHotTasks(ctx, memberId, task.TeamId)
+	if err != nil {
+		t.Fatalf("GetHotTasks with empty hot data failed: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("GetHotTasks should return empty list for no heat data, got %d items", len(items))
+	}
+}
+
+func createTaskTestFixture(t *testing.T) (teamId uint64, memberId uint64, otherMemberId uint64) {
+	t.Helper()
+
+	task, memberId, otherMemberId := statusNotificationTestFixture(t)
+	return task.TeamId, memberId, otherMemberId
+}
+
+func cleanupCreatedTask(t *testing.T, taskId uint64, teamId uint64) {
+	t.Helper()
+	ctx := gctx.New()
+
+	if _, err := dao.Task.Ctx(ctx).Where("id", taskId).Delete(); err != nil {
+		t.Errorf("delete created task failed: %v", err)
+	}
+	if err := deleteTaskDetailCache(ctx, taskId); err != nil {
+		t.Errorf("delete task detail cache failed: %v", err)
+	}
+	activityKey := fmt.Sprintf("team:activities:%d", teamId)
+	if _, err := g.Redis().LPop(ctx, activityKey); err != nil {
+		t.Errorf("remove create task activity failed: %v", err)
+	}
+}
+
+func TestDecayTeamHotScoreReducesScores(t *testing.T) {
+	ctx := gctx.New()
+	taskId := uint64(time.Now().UnixNano())
+	teamId := taskId + 1
+	key := taskHotKey(teamId)
+	taskIdStr := fmt.Sprintf("%d", taskId)
+
+	// 1. 准备：写入热度 100
+	if _, err := g.Redis().Do(ctx, "ZADD", key, 100, taskIdStr); err != nil {
+		t.Fatalf("prepare ZADD failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := g.Redis().Del(ctx, key); err != nil {
+			t.Errorf("clean hot key failed: %v", err)
+		}
+	})
+
+	// 2. 执行衰减
+	decayed, err := DecayTeamHotScore(ctx, teamId, 0.9)
+	if err != nil {
+		t.Fatalf("DecayTeamHotScore failed: %v", err)
+	}
+	if decayed != 1 {
+		t.Fatalf("expected 1 task decayed, got %d", decayed)
+	}
+
+	// 3. 验证分数变为 90（100 × 0.9）
+	score, err := g.Redis().ZScore(ctx, key, taskIdStr)
+	if err != nil {
+		t.Fatalf("ZScore failed: %v", err)
+	}
+	if score != 90 {
+		t.Fatalf("expected score 90, got %f", score)
+	}
+}
+
+func TestDecayTeamHotScoreMultipleTimes(t *testing.T) {
+	ctx := gctx.New()
+	taskId := uint64(time.Now().UnixNano())
+	teamId := taskId + 1
+	key := taskHotKey(teamId)
+	taskIdStr := fmt.Sprintf("%d", taskId)
+
+	// 准备：写入热度 1000
+	if _, err := g.Redis().Do(ctx, "ZADD", key, 1000, taskIdStr); err != nil {
+		t.Fatalf("prepare ZADD failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := g.Redis().Del(ctx, key); err != nil {
+			t.Errorf("clean hot key failed: %v", err)
+		}
+	})
+
+	// 连续衰减 3 次：1000 → 900 → 810 → 729
+	for i := 0; i < 3; i++ {
+		if _, err := DecayTeamHotScore(ctx, teamId, 0.9); err != nil {
+			t.Fatalf("DecayTeamHotScore round %d failed: %v", i+1, err)
+		}
+	}
+
+	score, err := g.Redis().ZScore(ctx, key, taskIdStr)
+	if err != nil {
+		t.Fatalf("ZScore failed: %v", err)
+	}
+	// 1000 × 0.9³ = 729
+	if score != 729 {
+		t.Fatalf("expected score 729 after 3 decays, got %f", score)
+	}
+}
+
+func TestDecayTeamHotScoreSkipsDailyAndWeeklyKeys(t *testing.T) {
+	ctx := gctx.New()
+	teamId := uint64(time.Now().UnixNano())
+	totalKey := taskHotKey(teamId)
+	dailyKey := taskHotDailyKey(teamId, time.Now())
+	weeklyKey := taskHotWeeklyKey(teamId, time.Now())
+	taskIdStr := fmt.Sprintf("%d", teamId+1)
+
+	// 三个榜单都写入同一个 taskId 的热度
+	if _, err := g.Redis().Do(ctx, "ZADD", totalKey, 100, taskIdStr); err != nil {
+		t.Fatalf("prepare total key failed: %v", err)
+	}
+	if _, err := g.Redis().Do(ctx, "ZADD", dailyKey, 100, taskIdStr); err != nil {
+		t.Fatalf("prepare daily key failed: %v", err)
+	}
+	if _, err := g.Redis().Do(ctx, "ZADD", weeklyKey, 100, taskIdStr); err != nil {
+		t.Fatalf("prepare weekly key failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := g.Redis().Del(ctx, totalKey, dailyKey, weeklyKey); err != nil {
+			t.Errorf("cleanup failed: %v", err)
+		}
+	})
+
+	// 执行衰减（只衰减总榜）
+	if _, err := DecayTeamHotScore(ctx, teamId, 0.9); err != nil {
+		t.Fatalf("DecayTeamHotScore failed: %v", err)
+	}
+
+	// 总榜分数应变为 90
+	totalScore, _ := g.Redis().ZScore(ctx, totalKey, taskIdStr)
+	if totalScore != 90 {
+		t.Fatalf("total score should be 90, got %f", totalScore)
+	}
+
+	// 日榜和周榜分数不变，仍为 100
+	dailyScore, _ := g.Redis().ZScore(ctx, dailyKey, taskIdStr)
+	if dailyScore != 100 {
+		t.Fatalf("daily score should be 100, got %f", dailyScore)
+	}
+	weeklyScore, _ := g.Redis().ZScore(ctx, weeklyKey, taskIdStr)
+	if weeklyScore != 100 {
+		t.Fatalf("weekly score should be 100, got %f", weeklyScore)
 	}
 }
